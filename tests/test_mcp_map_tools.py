@@ -135,6 +135,13 @@ def test_unknown_scorer_refused(client, run_file):
     assert reply["error"]["code"] == "plan_rejected"
 
 
+def test_a_run_passed_as_a_map_is_refused_with_a_pointer_to_assemble_map(client, run_file):
+    c, _tools = client
+    reply = call(c, "score_map", map=run_file)
+    assert reply["error"]["code"] == "plan_rejected"
+    assert "assemble_map" in reply["error"]["message"]
+
+
 def test_scorers_listed(client):
     c, _tools = client
     scorers = call(c, "list_scorers")

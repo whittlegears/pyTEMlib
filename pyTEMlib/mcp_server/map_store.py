@@ -264,8 +264,15 @@ class MapStore:
     def map_metadata(self, map_key: str) -> dict:
         if self.is_local(map_key):
             with h5py.File(map_key, "r") as h5:
-                return json.loads(h5.attrs["metadata"])
-        return dict(self.client[map_key].metadata)
+                meta = json.loads(h5.attrs["metadata"]) if "metadata" in h5.attrs else {}
+        else:
+            meta = dict(self.client[map_key].metadata)
+        if meta.get("kind") != "stitched_map":
+            raise ValueError(
+                f"{map_key} is not a stitched map (a Mapper run is not one); stitch it with assemble_map "
+                "and pass the key from its results (result_keys.map)."
+            )
+        return meta
 
     def read_level(self, map_key: str, level: int, rows: slice = slice(None), cols: slice = slice(None)) -> np.ndarray:
         if self.is_local(map_key):
