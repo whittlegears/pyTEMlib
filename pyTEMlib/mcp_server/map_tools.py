@@ -93,10 +93,19 @@ class MapTools:
         level = int(plan.get("level", min(2, meta["levels"] - 1)))
         image = self.store.read_level(plan["map"], level)
         pixel = meta["pixel_size_m"] * 2**level
-        window = max(16, int(round(float(plan.get("window_m", 100 * pixel)) / pixel)))
-        scores = score_windows(image, scorer, window, metadata={"level": level, "pixel_size_m": pixel})
+        if "window_m" in plan:
+            window = int(round(float(plan["window_m"]) / pixel))
+        else:  # aim for about a 6 x 6 grid of candidate regions
+            window = min(image.shape[:2]) // 6
+        window = int(np.clip(window, 16, max(16, min(image.shape[:2]))))
+        scores = score_windows(image, scorer, window, stride=max(1, window // 2), metadata={"level": level, "pixel_size_m": pixel})
         scores.sort(key=lambda s: s["value"], reverse=True)
-        top = scores[: int(plan.get("top_k", 5))]
+        top: list[dict] = []
+        for s in scores:  # keep chosen regions at least one window apart
+            if all(abs(s["row"] - t["row"]) >= window or abs(s["col"] - t["col"]) >= window for t in top):
+                top.append(s)
+            if len(top) >= int(plan.get("top_k", 5)):
+                break
         pois = list(meta.get("pois", []))
         added = []
         for s in top:
@@ -138,7 +147,7 @@ class MapTools:
 
             map: the map key or path (assemble_map results -> result_keys.map).
             scorer: one of list_scorers(). top_k: how many points of interest to add.
-            window_m: region size in metres (default about 100 pixels of the chosen level).
+            window_m: region size in metres (default: a sixth of the map, so about 6 x 6 candidate regions).
             Returns a job_id; job_results(job_id).summary.added_pois lists the new points.
             """
             plan = {"task": "score_map", "map": map, "scorer": scorer, "top_k": top_k}

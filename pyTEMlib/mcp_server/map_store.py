@@ -143,6 +143,17 @@ class MapStore:
                 h5.attrs["metadata"] = json.dumps(metadata)
             return str(path)
         name = self.map_name(run)
+        try:
+            return self._write_tiled(name, levels, metadata)
+        except Exception as exc:
+            if "401" in str(exc) or "permission" in str(exc).lower():
+                raise PermissionError(
+                    f"Tiled at {self.tiled_uri} refused to store the map: {exc}. Start this server with the Tiled API key "
+                    "(--api-key, or $ASYNCROSCOPY_TILED_API_KEY; an asyncroscopy stack uses 'secret' unless that variable is set)."
+                ) from exc
+            raise
+
+    def _write_tiled(self, name: str, levels: list[np.ndarray], metadata: dict) -> str:
         if name in self.client:
             self.client[name].delete_tree() if hasattr(self.client[name], "delete_tree") else self.client.delete(name)
         container = self.client.create_container(name, metadata=metadata)
