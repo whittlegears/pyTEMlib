@@ -13,10 +13,9 @@ from pyTEMlib.mcp_server import ENVELOPE_SCHEMA_PATH, create_server
 from .test_mosaic import PIXEL, TILE, make_tiles
 
 
-@pytest.fixture
-def run_file(tmp_path):
-    tiles, _truth = make_tiles(stage_error_px=6.0, grid=3)
-    path = tmp_path / "map_test.h5"
+def write_run(path, grid=3):
+    tiles, _truth = make_tiles(stage_error_px=6.0, grid=grid)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
         h5.attrs["plan"] = json.dumps({"fov_m": TILE * PIXEL})
         group = h5.create_group("tiles")
@@ -28,21 +27,46 @@ def run_file(tmp_path):
     return str(path)
 
 
+@pytest.fixture
+def run_file(tmp_path):
+    return write_run(tmp_path / "map_test.h5")
+
+
 def call(client, tool, **args):
     result = asyncio.get_event_loop().run_until_complete(client.call_tool(tool, args))
     return result.structured_content if result.structured_content is not None else result.data
 
 
-@pytest.fixture
-def client():
-    mcp, tools = create_server(include_basic=False)
+def open_client(**kwargs):
+    mcp, tools = create_server(include_basic=False, **kwargs)
     c = Client(mcp)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(c.__aenter__())
+    return c, tools, loop
+
+
+@pytest.fixture
+def client(tmp_path):
+    c, tools, loop = open_client(local_roots=[tmp_path])
     yield c, tools
     loop.run_until_complete(c.__aexit__(None, None, None))
     loop.close()
+
+
+@pytest.fixture
+def client_factory():
+    opened = []
+
+    def make(**kwargs):
+        c, tools, loop = open_client(**kwargs)
+        opened.append((c, loop))
+        return c, tools
+
+    yield make
+    for c, loop in opened:
+        loop.run_until_complete(c.__aexit__(None, None, None))
+        loop.close()
 
 
 def envelope(name):
@@ -202,3 +226,105 @@ def test_server_object_exported_and_create_server_repeatable():
     with pytest.raises(RuntimeError):
         _, other_tools = create_server(include_basic=False)
         other_tools.register(first)
+
+
+def test_restitching_keeps_points_of_interest(client, run_file):
+    c, tools = client
+    map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
+    info = call(c, "map_info", map=map_key)
+    x0, x1, y0, y1 = info["stage_box_m"]
+    poi = call(c, "add_poi", map=map_key, x_m=(x0 + x1) / 2, y_m=(y0 + y1) / 2, kind="eds_point", links=["spectrum_001.h5"])
+
+    again = finish(c, tools, call(c, "assemble_map", run=run_file, refine=False)["job_id"])["result_keys"]["map"]
+    assert again == map_key
+    meta = tools.store.map_metadata(map_key)
+    assert meta["refined"] is False  # the map really was rewritten
+    assert meta["pois"] == [poi]
+
+
+def test_local_paths_outside_the_roots_are_refused(client_factory, tmp_path):
+    from pyTEMlib.mcp_server.map_store import LocalPathRefused, MapStore
+
+    inside, outside = tmp_path / "inside", tmp_path / "outside"
+    inside.mkdir()
+    run_outside = write_run(outside / "secret.h5", grid=2)
+    c, tools = client_factory(local_roots=[inside])
+
+    reply = call(c, "assemble_map", run=run_outside)
+    jsonschema.validate(reply, envelope("error_response"))
+    assert reply["error"]["code"] == "plan_rejected"
+    assert str(inside.resolve()) in reply["error"]["message"]
+    with pytest.raises(LocalPathRefused, match="outside the directories"):
+        tools.store.map_metadata(run_outside)
+    assert not (outside / "secret_map.h5").exists()
+
+    # the same file is fine once its directory is a root
+    assert MapStore(local_roots=[outside]).is_local(run_outside)
+    assert not MapStore(local_roots=[inside]).is_local(str(inside / "missing.h5"))  # not a file: treated as a Tiled key
+
+
+def test_abort_during_registration_stops_promptly(client, run_file, monkeypatch):
+    import threading
+    import time
+
+    from pyTEMlib.image_tools import mosaic
+
+    real = mosaic.phase_cross_correlation
+    calls = []
+    started = threading.Event()
+
+    def slow(*args, **kwargs):  # stands in for a large tile pair (~0.3 s each on 512 x 512)
+        calls.append(1)
+        started.set()
+        time.sleep(0.2)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mosaic, "phase_cross_correlation", slow)
+    c, tools = client
+    job_id = call(c, "assemble_map", run=run_file)["job_id"]
+    assert started.wait(30)
+    status = call(c, "analysis_job_status", job_id=job_id)
+    assert status["state"] == "running"
+    pairs = status["progress"]["total"] - 2
+    assert pairs >= 12  # 3 x 3 grid: 12 edge pairs, plus diagonals if they overlap enough
+
+    t0 = time.monotonic()
+    aborted = call(c, "analysis_job_abort", job_id=job_id)
+    assert time.monotonic() - t0 < 2.0
+    assert aborted["state"] == "aborted", aborted
+    assert len(calls) < pairs
+    assert call(c, "analysis_job_results", job_id=job_id)["result_keys"] == {}
+
+
+def test_oversized_map_refused_before_reading_pixels(client_factory, run_file, tmp_path, monkeypatch):
+    c, tools = client_factory(local_roots=[tmp_path], max_canvas_pixels=100_000)
+    monkeypatch.setattr(tools.store, "open_run", lambda *a, **k: pytest.fail("limit checked after loading tile images"))
+    reply = call(c, "assemble_map", run=run_file)
+    jsonschema.validate(reply, envelope("error_response"))
+    assert reply["error"]["code"] == "plan_rejected"
+    assert "megapixels" in reply["error"]["message"] and "box_m" in reply["error"]["message"]
+
+    # a part of the run that fits is accepted, and the estimate gives the canvas size
+    first = tools.store.scan_run(run_file).tiles[0]
+    x, y = first.stage_xy_m
+    reserved = tools.jobs.reserve({"task": "assemble_map", "run": run_file, "box_m": [x - 1e-12, x + 1e-12, y - 1e-12, y + 1e-12]})
+    assert reserved["estimate"]["canvas_shape"] == [TILE, TILE]
+
+
+def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path):
+    from pyTEMlib.mcp_server import __main__ as cli
+
+    seen = {}
+
+    def fake_create_server(*args, **kwargs):
+        seen["args"], seen["kwargs"] = args, kwargs
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "create_server", fake_create_server)
+    with pytest.raises(SystemExit):
+        cli.main(["--tiled", "http://localhost:9091", "--api-key", "secret", "--port", "8003"])
+    assert seen["args"] == ("http://localhost:9091", "secret")
+    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000}
+    with pytest.raises(SystemExit):
+        cli.main(["--local-root", str(tmp_path), "--local-root", "data", "--max-canvas-megapixels", "50"])
+    assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000}

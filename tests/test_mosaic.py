@@ -117,3 +117,21 @@ def test_mixed_pixel_sizes_rejected():
     tiles[1] = Tile(tiles[1].image, tiles[1].stage_xy_m, 2 * PIXEL)
     with pytest.raises(ValueError, match="pixel size"):
         register_tiles(tiles)
+
+
+def test_registration_reports_pairs_and_can_be_stopped():
+    tiles, _truth = make_tiles(stage_error_px=3.0, grid=3)
+    seen = []
+    register_tiles(tiles, on_pair=lambda done, total: seen.append((done, total)))
+    total = seen[0][1]
+    assert total >= 12 and seen == [(k, total) for k in range(total + 1)]
+
+    class Stop(Exception):
+        pass
+
+    def stop_at_three(done, total):
+        if done == 3:
+            raise Stop
+
+    with pytest.raises(Stop):
+        register_tiles(tiles, on_pair=stop_at_three)

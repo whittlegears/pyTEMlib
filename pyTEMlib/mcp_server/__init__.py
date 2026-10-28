@@ -13,6 +13,12 @@ Run it with::
 
     python -m pyTEMlib.mcp_server --tiled http://localhost:9091 --port 8003
 
+Local HDF5 paths are accepted only under ``--local-root`` directories
+(repeatable; default the working directory). ``assemble_map`` holds the
+whole stitched map in memory, so it refuses maps over
+``--max-canvas-megapixels`` (default 400) at full resolution; see
+``map_tools`` for the details.
+
 ``create_server`` builds the same server in-process; ``from pyTEMlib.mcp_server import mcp``
 gives a default instance (local files, no Tiled URI) built on first use.
 """
@@ -25,11 +31,22 @@ from fastmcp import FastMCP
 
 from .jobs import ENVELOPE_SCHEMA_PATH, ENVELOPE_VERSION, JobRunner
 from .map_store import MapStore
-from .map_tools import MapTools
+from .map_tools import DEFAULT_MAX_CANVAS_PIXELS, MapTools
 
 
-def create_server(tiled_uri: str | None = None, api_key: str | None = None, name: str = "pyTEMlib-MCP", include_basic: bool = True) -> tuple[FastMCP, MapTools]:
+def create_server(
+    tiled_uri: str | None = None,
+    api_key: str | None = None,
+    name: str = "pyTEMlib-MCP",
+    include_basic: bool = True,
+    local_roots: list | None = None,
+    max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS,
+) -> tuple[FastMCP, MapTools]:
     """Build a new MCP server; returns (FastMCP app, MapTools) so callers can also use the tools directly.
+
+    ``local_roots``: directories whose HDF5 files may be used as local runs and
+    maps (default: the current working directory). ``max_canvas_pixels``:
+    largest level-0 map ``assemble_map`` will stitch (it is held in memory).
 
     Every call returns a fresh FastMCP instance, so calling it twice never
     registers a tool twice. The basic tools are mounted from
@@ -40,7 +57,7 @@ def create_server(tiled_uri: str | None = None, api_key: str | None = None, name
         from . import basic_tools
 
         mcp.mount(basic_tools.mcp)
-    tools = MapTools(MapStore(tiled_uri, api_key))
+    tools = MapTools(MapStore(tiled_uri, api_key, local_roots=local_roots), max_canvas_pixels=max_canvas_pixels)
     tools.register(mcp)
     return mcp, tools
 

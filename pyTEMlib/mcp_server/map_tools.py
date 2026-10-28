@@ -4,6 +4,23 @@ MCP tools for stitching, viewing, scoring and annotating microscope maps.
 Agents never receive full arrays: tools take and return keys (Tiled keys or
 file paths), stage coordinates in metres, scores and short previews. Pixels
 move between Tiled and this server directly.
+
+Memory: ``assemble_map`` holds the whole map in this process. The job loads
+every tile image of the run (or of ``box_m``) at once, and although
+``mosaic.assemble`` produces the canvas band by band, the job keeps every
+band of every pyramid level and then stacks them into full arrays before
+writing. The peak is therefore about the tiles plus twice the pyramid
+(level 0 and the coarser levels, about 1.33 x the level-0 canvas, in the
+tiles' dtype: once as bands, once stacked), e.g. roughly 3 GB for a
+400-megapixel uint16 map. To keep that from taking the host down,
+``assemble_map`` refuses, at reserve time and from tile metadata alone
+(before any pixel is read), a run whose level-0 canvas would exceed
+``max_canvas_pixels`` (default 400 megapixels; ``--max-canvas-megapixels``
+on the command line); stitch part of it with ``box_m`` instead. A streaming
+writer that appends each band to chunked ``level_k`` datasets in HDF5 or
+Tiled as ``assemble`` emits it, and reads only the tiles that touch the
+current band, would bound memory by the band size and make the limit
+unnecessary.
 """
 
 from __future__ import annotations
@@ -20,13 +37,14 @@ from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as MCPImage
 
-from pyTEMlib.image_tools.mosaic import assemble, pyramid_levels, register_tiles
+from pyTEMlib.image_tools.mosaic import assemble, pyramid_levels, register_tiles, stage_canvas_shape
 from pyTEMlib.scoring import available_scorers, score_windows
 
 from .jobs import JobRunner
 from .map_store import MapStore, pixel_to_stage, stage_box_to_pixels
 
 PREVIEW_MAX_SIDE = 512
+DEFAULT_MAX_CANVAS_PIXELS = 400_000_000  # level-0 pixels; the whole map is held in memory while stitching
 
 # FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
 _REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
@@ -52,8 +70,9 @@ def _loads(request: str | dict) -> dict:
 
 
 class MapTools:
-    def __init__(self, store: MapStore):
+    def __init__(self, store: MapStore, max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS):
         self.store = store
+        self.max_canvas_pixels = int(max_canvas_pixels)
         self.jobs = JobRunner()
         self.jobs.register("assemble_map", self._check_assemble, self._run_assemble)
         self.jobs.register("score_map", self._check_score, self._run_score)
@@ -62,18 +81,46 @@ class MapTools:
     def _check_assemble(self, plan: dict) -> dict:
         # Metadata and shapes only: reading every tile image here would block the request; _run_assemble loads them.
         run = self.store.scan_run(plan["run"], plan.get("box_m"))
-        return {"steps": len(run.tiles) + 1, "tiles": len(run.tiles)}
+        canvas = stage_canvas_shape([t.stage_xy_m for t in run.tiles], [t.shape[:2] for t in run.tiles], [t.pixel_size_m for t in run.tiles])
+        self._check_canvas(canvas)
+        return {"steps": len(run.tiles) + 1, "tiles": len(run.tiles), "canvas_shape": list(canvas), "canvas_megapixels": round(canvas[0] * canvas[1] / 1e6, 3)}
+
+    def _check_canvas(self, canvas: tuple[int, int]) -> None:
+        pixels = int(canvas[0]) * int(canvas[1])
+        if pixels > self.max_canvas_pixels:
+            raise ValueError(
+                f"the stitched map would be {canvas[0]} x {canvas[1]} = {pixels / 1e6:.1f} megapixels at full resolution, over this "
+                f"server's limit of {self.max_canvas_pixels / 1e6:.1f} megapixels (the whole map is held in memory while stitching); "
+                "stitch part of the run with box_m, or start the server with a larger --max-canvas-megapixels"
+            )
 
     def _run_assemble(self, plan: dict, progress) -> dict:
         run = self.store.open_run(plan["run"], plan.get("box_m"))
+        # Progress steps: one per overlapping tile pair matched (the slow part), then assembling, then writing.
+        steps = {"pairs": 0}
+
+        def on_pair(done: int, total: int) -> None:
+            steps["pairs"] = total
+            progress(done, total + 2)  # raises Aborted when the job is aborted, which stops registration
+
         progress(0, len(run.tiles) + 1)
-        placement = register_tiles(run.tiles, stage_sigma_m=float(plan.get("stage_sigma_m", 200e-9)), refine=bool(plan.get("refine", True)))
-        progress(len(run.tiles), len(run.tiles) + 1)
+        placement = register_tiles(run.tiles, stage_sigma_m=float(plan.get("stage_sigma_m", 200e-9)), refine=bool(plan.get("refine", True)), on_pair=on_pair)
+        pairs = steps["pairs"]
+        progress(pairs, pairs + 2)
+        self._check_canvas(placement.canvas_shape)  # refinement can grow the canvas by a few pixels
         bands: dict[int, list] = {}
-        levels = assemble(run.tiles, placement, lambda level, row0, band: bands.setdefault(level, []).append((row0, band)), levels=pyramid_levels(placement.canvas_shape))
+
+        def keep(level: int, row0: int, band: np.ndarray) -> None:
+            bands.setdefault(level, []).append((row0, band))
+            if level == 0:
+                progress(pairs)  # lets an abort stop assembly between bands
+
+        levels = assemble(run.tiles, placement, keep, levels=pyramid_levels(placement.canvas_shape))
         arrays = [np.vstack([b for _, b in sorted(bands[k], key=lambda x: x[0])]) for k in range(levels)]
+        bands.clear()
+        progress(pairs + 1)
         key = self.store.write_map(plan["run"], arrays, placement, extra={"stitched_at": time.time(), "refined": bool(plan.get("refine", True))})
-        progress(len(run.tiles) + 1)
+        progress(pairs + 2)
         return {
             "result_keys": {"map": key},
             "summary": {

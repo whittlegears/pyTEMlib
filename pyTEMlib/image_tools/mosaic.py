@@ -12,7 +12,11 @@ starts from each tile's reported stage position, then refines it:
    keeps its stage position, so a blank area cannot pull a tile away.
 3. The canvas is written in horizontal bands with linear blending in the
    overlaps, and each pyramid level is made from the one above by 2x2 averaging
-   band by band, so memory stays bounded by the band size, not the map size.
+   band by band, so ``assemble`` itself needs memory for one band per level,
+   not for the whole map. The tiles are held in memory, and a sink that keeps
+   every band (``stitch_to_arrays``, the MCP server's ``assemble_map``) still
+   ends up holding the whole map; only a sink that writes bands out as they
+   arrive keeps the total bounded.
 
 Coordinates: images are [row, column] with rows along +y and columns along
 +x; stage positions are (x, y) in metres and mark the tile centre.
@@ -63,21 +67,42 @@ class Placement:
         return ((y - self.origin_xy_m[1]) / self.pixel_size_m, (x - self.origin_xy_m[0]) / self.pixel_size_m)
 
 
-def place_by_stage(tiles: Sequence[Tile]) -> tuple[np.ndarray, float, tuple[float, float]]:
-    """Top-left canvas positions (row, col) from stage positions; returns (positions, pixel size, origin)."""
-    if not tiles:
+def stage_layout(centres_xy_m, shapes, pixel_sizes_m) -> tuple[np.ndarray, float, tuple[float, float]]:
+    """Top-left canvas positions (row, col) from tile centres and image shapes alone (no pixels needed).
+
+    Returns (positions, pixel size, origin); see ``place_by_stage``.
+    """
+    if len(centres_xy_m) == 0:
         raise ValueError("no tiles to place")
-    pixel = float(tiles[0].pixel_size_m)
-    if any(abs(t.pixel_size_m - pixel) > 1e-6 * pixel for t in tiles):
+    pixel = float(pixel_sizes_m[0])
+    if any(abs(p - pixel) > 1e-6 * pixel for p in pixel_sizes_m):
         raise ValueError("all tiles must share one pixel size; resample first")
-    centres = np.array([t.stage_xy_m for t in tiles], dtype=np.float64)
-    shapes = np.array([t.image.shape[:2] for t in tiles], dtype=np.float64)
+    centres = np.asarray(centres_xy_m, dtype=np.float64)
+    shapes = np.asarray(shapes, dtype=np.float64)[:, :2]
     top_left_xy = centres - shapes[:, ::-1] * pixel / 2.0  # (x, y) of each tile's corner
     origin = top_left_xy.min(axis=0)
     rows = (top_left_xy[:, 1] - origin[1]) / pixel
     cols = (top_left_xy[:, 0] - origin[0]) / pixel
     # Origin is the centre of canvas pixel (0, 0).
     return np.stack([rows, cols], axis=1), pixel, (float(origin[0] + pixel / 2), float(origin[1] + pixel / 2))
+
+
+def stage_canvas_shape(centres_xy_m, shapes, pixel_sizes_m) -> tuple[int, int]:
+    """Canvas (rows, cols) of the stage-only placement, from metadata alone.
+
+    Refinement moves tiles by at most a fraction of their overlap, so the
+    stitched canvas is within a few pixels of this.
+    """
+    positions, _pixel, _origin = stage_layout(centres_xy_m, shapes, pixel_sizes_m)
+    extent = (positions + np.asarray(shapes, dtype=np.float64)[:, :2]).max(axis=0)
+    return int(np.ceil(extent[0])), int(np.ceil(extent[1]))
+
+
+def place_by_stage(tiles: Sequence[Tile]) -> tuple[np.ndarray, float, tuple[float, float]]:
+    """Top-left canvas positions (row, col) from stage positions; returns (positions, pixel size, origin)."""
+    if not tiles:
+        raise ValueError("no tiles to place")
+    return stage_layout([t.stage_xy_m for t in tiles], [t.image.shape[:2] for t in tiles], [t.pixel_size_m for t in tiles])
 
 
 def _ncc(a: np.ndarray, b: np.ndarray) -> float:
@@ -92,6 +117,7 @@ def pairwise_offsets(
     positions: np.ndarray,
     min_overlap_px: int = 16,
     max_correction_px: float | None = None,
+    on_pair: Callable[[int, int], None] | None = None,
 ) -> list[PairMatch]:
     """Measure how far each overlapping pair is from where the stage put it.
 
@@ -99,9 +125,14 @@ def pairwise_offsets(
     allows any partial overlap, so a stage error almost as large as the
     overlap itself is still measured (cropping both tiles to the predicted
     overlap strip and phase-correlating that biases or loses large shifts).
+
+    ``on_pair(done, total)`` is called before each overlapping pair is matched
+    and once at the end; it may raise (e.g. a job's abort) to stop early.
     """
     matches: list[PairMatch] = []
     shapes = np.array([t.image.shape[:2] for t in tiles])
+    # Overlapping pairs first (bounding boxes only, cheap), so progress can report a total.
+    pairs: list[tuple[int, int, int, int]] = []
     for i in range(len(tiles)):
         for j in range(i + 1, len(tiles)):
             top = max(positions[i, 0], positions[j, 0])
@@ -109,25 +140,30 @@ def pairwise_offsets(
             bottom = min(positions[i, 0] + shapes[i, 0], positions[j, 0] + shapes[j, 0])
             right = min(positions[i, 1] + shapes[i, 1], positions[j, 1] + shapes[j, 1])
             height, width = int(bottom - top), int(right - left)
-            if height < min_overlap_px or width < min_overlap_px:
-                continue
-            a = tiles[i].image.astype(np.float64)
-            b = tiles[j].image.astype(np.float64)
-            if a.std() == 0 or b.std() == 0:
-                continue
-            predicted = positions[j] - positions[i]
-            overlap_ratio = 0.5 * min(height * width / a.size, height * width / b.size)
-            shift = phase_cross_correlation(a, b, reference_mask=np.ones_like(a, bool), moving_mask=np.ones_like(b, bool), overlap_ratio=overlap_ratio)
-            shift = np.asarray(shift[0] if isinstance(shift, tuple) else shift, dtype=np.float64)
-            # shift moves b onto a, so it is b's position relative to a.
-            correction = shift - predicted
-            limit = max_correction_px if max_correction_px is not None else 0.6 * min(height, width)
-            if np.hypot(*correction) > limit:
-                continue
-            confidence = _overlap_ncc(a, b, shift, min_overlap_px)
-            if confidence is None:
-                continue
-            matches.append(PairMatch(i, j, correction, confidence))
+            if height >= min_overlap_px and width >= min_overlap_px:
+                pairs.append((i, j, height, width))
+    for done, (i, j, height, width) in enumerate(pairs):
+        if on_pair is not None:
+            on_pair(done, len(pairs))  # may raise to stop registration
+        a = tiles[i].image.astype(np.float64)
+        b = tiles[j].image.astype(np.float64)
+        if a.std() == 0 or b.std() == 0:
+            continue
+        predicted = positions[j] - positions[i]
+        overlap_ratio = 0.5 * min(height * width / a.size, height * width / b.size)
+        shift = phase_cross_correlation(a, b, reference_mask=np.ones_like(a, bool), moving_mask=np.ones_like(b, bool), overlap_ratio=overlap_ratio)
+        shift = np.asarray(shift[0] if isinstance(shift, tuple) else shift, dtype=np.float64)
+        # shift moves b onto a, so it is b's position relative to a.
+        correction = shift - predicted
+        limit = max_correction_px if max_correction_px is not None else 0.6 * min(height, width)
+        if np.hypot(*correction) > limit:
+            continue
+        confidence = _overlap_ncc(a, b, shift, min_overlap_px)
+        if confidence is None:
+            continue
+        matches.append(PairMatch(i, j, correction, confidence))
+    if on_pair is not None:
+        on_pair(len(pairs), len(pairs))
     return matches
 
 
@@ -200,10 +236,15 @@ def register_tiles(
     stage_sigma_m: float = 200e-9,
     min_confidence: float = 0.3,
     refine: bool = True,
+    on_pair: Callable[[int, int], None] | None = None,
 ) -> Placement:
-    """Place tiles by stage position, then refine with image matching."""
+    """Place tiles by stage position, then refine with image matching.
+
+    ``on_pair(done, total)`` reports matching progress over the overlapping
+    pairs (the slow part) and may raise to abort; see ``pairwise_offsets``.
+    """
     stage_px, pixel, origin = place_by_stage(tiles)
-    matches = pairwise_offsets(tiles, stage_px) if refine else []
+    matches = pairwise_offsets(tiles, stage_px, on_pair=on_pair) if refine else []
     positions, used = solve_positions(stage_px, matches, stage_sigma_m / pixel, min_confidence=min_confidence) if matches else (stage_px.copy(), [])
     used_ids = {id(m) for m in used}
     for m in matches:

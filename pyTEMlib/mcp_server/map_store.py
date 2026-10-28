@@ -10,7 +10,14 @@ plus metadata holding the pixel-to-stage transform and the points of
 interest.
 
 The same functions work against a Tiled server (keys) or the filesystem
-(paths). This module never imports asyncroscopy.
+(paths). Local paths are accepted only under the store's ``local_roots``
+(default: the working directory), so a client cannot read, or write a map
+next to, an arbitrary HDF5 file on the host. This module never imports
+asyncroscopy.
+
+Re-stitching a run replaces its map's pixels and transform but keeps the
+map's points of interest: they are stage coordinates, so they stay valid
+after the tiles are re-registered.
 """
 
 from __future__ import annotations
@@ -56,7 +63,12 @@ class RunInfo:
     plan: dict
 
 
-# Serialises read-modify-write of a map's points of interest within this
+class LocalPathRefused(ValueError):
+    """A local file path outside the store's ``local_roots``."""
+
+
+# Serialises read-modify-write of a map's points of interest (and re-writes of
+# a whole map, which carry the points over) within this
 # process. It does NOT protect against several server processes writing the
 # same map; that would need a lock in the store (e.g. Tiled) itself.
 _POI_LOCK = threading.Lock()
@@ -94,9 +106,12 @@ def _tile_from(info: TileInfo, image: np.ndarray) -> Tile:
 class MapStore:
     """Where runs are read from and maps are written to."""
 
-    def __init__(self, tiled_uri: str | None = None, api_key: str | None = None):
+    def __init__(self, tiled_uri: str | None = None, api_key: str | None = None, local_roots: list[str | os.PathLike] | None = None):
+        """``local_roots``: directories whose HDF5 files (and subdirectories') may be read and written as
+        local paths; default the current working directory. Pass ``[]`` to accept no local paths."""
         self.tiled_uri = tiled_uri
         self.api_key = api_key or os.environ.get("ASYNCROSCOPY_TILED_API_KEY") or os.environ.get("TILED_API_KEY")
+        self.local_roots = [Path(r).resolve() for r in ([Path.cwd()] if local_roots is None else local_roots)]
         self._client = None
 
     # -------------------------------------------------------------- helpers
@@ -110,9 +125,22 @@ class MapStore:
             self._client = from_uri(self.tiled_uri, api_key=self.api_key)
         return self._client
 
-    @staticmethod
-    def is_local(source: str) -> bool:
-        return Path(source).suffix.lower() in {".h5", ".hdf5"} and Path(source).exists()
+    def is_local(self, source: str) -> bool:
+        """True for an existing .h5/.hdf5 file under one of ``local_roots``; False for anything else (a Tiled key).
+
+        Raises LocalPathRefused for an existing HDF5 file outside the roots.
+        """
+        path = Path(source)
+        if path.suffix.lower() not in {".h5", ".hdf5"} or not path.exists():
+            return False
+        resolved = path.resolve()
+        if any(resolved == root or root in resolved.parents for root in self.local_roots):
+            return True
+        allowed = ", ".join(str(r) for r in self.local_roots) or "none"
+        raise LocalPathRefused(
+            f"local file {source!r} is outside the directories this server may read and write ({allowed}); "
+            "use a Tiled key, move the file under one of them, or start the server with --local-root <dir>"
+        )
 
     @staticmethod
     def map_name(run: str) -> str:
@@ -181,14 +209,40 @@ class MapStore:
             "pois": [],
             **(extra or {}),
         }
-        if self.is_local(run):
-            path = self.local_map_path(run)
-            with h5py.File(path, "w") as h5:
-                for k, level in enumerate(levels):
-                    h5.create_dataset(f"level_{k}", data=level, chunks=True)
-                h5.attrs["metadata"] = json.dumps(metadata)
-            return str(path)
-        name = self.map_name(run)
+        local = self.is_local(run)
+        # Under the POI lock, so an add_poi on the old map cannot slip in between reading its points and replacing it.
+        with _POI_LOCK:
+            if "pois" not in (extra or {}):
+                metadata["pois"] = self._existing_pois(run, local)
+            if local:
+                path = self.local_map_path(run)
+                with h5py.File(path, "w") as h5:
+                    for k, level in enumerate(levels):
+                        h5.create_dataset(f"level_{k}", data=level, chunks=True)
+                    h5.attrs["metadata"] = json.dumps(metadata)
+                return str(path)
+            return self._write_tiled_checked(self.map_name(run), levels, metadata)
+
+    def _existing_pois(self, run: str, local: bool) -> list[dict]:
+        """Points of interest of the map previously stitched from ``run`` (empty if there is none)."""
+        try:
+            if local:
+                path = self.local_map_path(run)
+                if not path.exists():
+                    return []
+                with h5py.File(path, "r") as h5:
+                    metadata = json.loads(h5.attrs["metadata"])
+            else:
+                name = self.map_name(run)
+                if name not in self.client:
+                    return []
+                metadata = dict(self.client[name].metadata)
+        except (OSError, KeyError, ValueError):  # unreadable or not a map: nothing to keep
+            return []
+        pois = _decode(metadata.get("pois", []))
+        return list(pois) if isinstance(pois, list) else []
+
+    def _write_tiled_checked(self, name: str, levels: list[np.ndarray], metadata: dict) -> str:
         try:
             return self._write_tiled(name, levels, metadata)
         except Exception as exc:
