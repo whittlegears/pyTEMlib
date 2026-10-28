@@ -52,10 +52,10 @@ def envelope(name):
 
 def finish(client, tools, job_id):
     tools.jobs.wait(job_id)
-    status = call(client, "job_status", job_id=job_id)
+    status = call(client, "analysis_job_status", job_id=job_id)
     jsonschema.validate(status, envelope("status_response"))
     assert status["state"] == "done", status
-    results = call(client, "job_results", job_id=job_id)
+    results = call(client, "analysis_job_results", job_id=job_id)
     jsonschema.validate(results, envelope("results_response"))
     return results
 

@@ -131,7 +131,7 @@ class MapTools:
             run: the run's Tiled key or file path (Mapper results -> result_keys.run or run_file).
             refine: refine stage positions by matching overlaps (turn off for blank samples).
             box_m: optional [x_min, x_max, y_min, y_max] stage box (metres) to stitch only part.
-            Returns a job_id; poll job_status, then job_results gives result_keys.map.
+            Returns a job_id; poll analysis_job_status, then analysis_job_results gives result_keys.map.
             """
             plan = {"task": "assemble_map", "run": run, "refine": refine}
             if box_m:
@@ -148,7 +148,7 @@ class MapTools:
             map: the map key or path (assemble_map results -> result_keys.map).
             scorer: one of list_scorers(). top_k: how many points of interest to add.
             window_m: region size in metres (default: a sixth of the map, so about 6 x 6 candidate regions).
-            Returns a job_id; job_results(job_id).summary.added_pois lists the new points.
+            Returns a job_id; analysis_job_results(job_id).summary.added_pois lists the new points.
             """
             plan = {"task": "score_map", "map": map, "scorer": scorer, "top_k": top_k}
             if window_m:
@@ -161,18 +161,18 @@ class MapTools:
             return tools.jobs.start(reserved["reservation_id"])
 
         @mcp.tool()
-        def job_status(job_id: str) -> dict[str, Any]:
-            """Progress of an analysis job: state (running, done, failed, aborted) and steps done of total."""
+        def analysis_job_status(job_id: str) -> dict[str, Any]:
+            """Progress of a pyTEMlib analysis job (assemble_map, score_map): state and steps done. Instrument jobs use Mapper_job_status."""
             return tools.jobs.status(job_id)
 
         @mcp.tool()
-        def job_results(job_id: str) -> dict[str, Any]:
-            """Keys and summary of what a finished analysis job produced."""
+        def analysis_job_results(job_id: str) -> dict[str, Any]:
+            """Keys and summary of what a finished pyTEMlib analysis job (assemble_map, score_map) produced."""
             return tools.jobs.results(job_id)
 
         @mcp.tool()
-        def job_abort(job_id: str) -> dict[str, Any]:
-            """Stop a running analysis job."""
+        def analysis_job_abort(job_id: str) -> dict[str, Any]:
+            """Stop a running pyTEMlib analysis job."""
             return tools.jobs.abort(job_id)
 
         @mcp.tool()
