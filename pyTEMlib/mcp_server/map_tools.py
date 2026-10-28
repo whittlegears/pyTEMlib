@@ -44,6 +44,7 @@ from .jobs import JobRunner
 from .map_store import MapStore, pixel_to_stage, stage_box_to_pixels
 
 PREVIEW_MAX_SIDE = 512
+MAX_STATUS_WAIT_S = 25.0  # analysis_job_status waits stay under MCP client timeouts
 DEFAULT_MAX_CANVAS_PIXELS = 400_000_000  # level-0 pixels; the whole map is held in memory while stitching
 
 # FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
@@ -218,8 +219,11 @@ class MapTools:
             return tools.jobs.start(reserved["reservation_id"])
 
         @mcp.tool()
-        def analysis_job_status(job_id: str) -> dict[str, Any]:
-            """Progress of a stitching or scoring job started by assemble_map or score_map. Not for map acquisitions: those started with Mapper_start use Mapper_job_status."""
+        def analysis_job_status(job_id: str, wait_s: float = 0.0) -> dict[str, Any]:
+            """Progress of a stitching or scoring job started by assemble_map or score_map; with wait_s (at most 25) it first waits for the job to finish. Not for map acquisitions: those started with Mapper_start use Mapper_job_status or wait_for_job."""
+            if wait_s > 0:
+                # Waiting here saves a small model dozens of polling turns.
+                return tools.jobs.wait(job_id, timeout=min(float(wait_s), MAX_STATUS_WAIT_S))
             return tools.jobs.status(job_id)
 
         @mcp.tool()

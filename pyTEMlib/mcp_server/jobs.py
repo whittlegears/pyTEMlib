@@ -141,7 +141,7 @@ class JobRunner:
         with self._lock:
             job = self._find(job_id)
             if job is None:
-                return self.error("unknown_job", f"no job {job_id!r}")
+                return self.error("unknown_job", f"no analysis job {job_id!r} (a job id from Mapper_start belongs to the instrument: use wait_for_job or Mapper_job_status there)")
             return self._status_locked(job)
 
     def abort(self, job_id: str) -> dict:
@@ -149,7 +149,7 @@ class JobRunner:
         with self._lock:
             job = self._find(job_id)
             if job is None:
-                return self.error("unknown_job", f"no job {job_id!r}")
+                return self.error("unknown_job", f"no analysis job {job_id!r} (a job id from Mapper_start belongs to the instrument: use wait_for_job or Mapper_job_status there)")
             if job["state"] == "running":
                 job["state"] = "aborting"
                 job["abort"].set()
@@ -164,7 +164,7 @@ class JobRunner:
         with self._lock:
             job = self._find(job_id)
             if job is None:
-                return self.error("unknown_job", f"no job {job_id!r}")
+                return self.error("unknown_job", f"no analysis job {job_id!r} (a job id from Mapper_start belongs to the instrument: use wait_for_job or Mapper_job_status there)")
             return self.reply(
                 {
                     "job_id": job.get("job_id", job["reservation_id"]),

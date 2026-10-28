@@ -328,3 +328,13 @@ def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path
     with pytest.raises(SystemExit):
         cli.main(["--local-root", str(tmp_path), "--local-root", "data", "--max-canvas-megapixels", "50"])
     assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000}
+
+
+def test_status_can_wait_for_the_job(client, run_file):
+    c, tools = client
+    started = call(c, "assemble_map", run=run_file)
+    status = call(c, "analysis_job_status", job_id=started["job_id"], wait_s=25)
+    assert status["state"] == "done", status
+    jsonschema.validate(status, envelope("status_response"))
+    unknown = call(c, "analysis_job_status", job_id="nope", wait_s=1)
+    assert unknown["error"]["code"] == "unknown_job" and "Mapper_start" in unknown["error"]["message"]
