@@ -162,17 +162,17 @@ class MapTools:
 
         @mcp.tool()
         def analysis_job_status(job_id: str) -> dict[str, Any]:
-            """Progress of a pyTEMlib analysis job (assemble_map, score_map): state and steps done. Instrument jobs use Mapper_job_status."""
+            """Progress of a stitching or scoring job started by assemble_map or score_map. Not for map acquisitions: those started with Mapper_start use Mapper_job_status."""
             return tools.jobs.status(job_id)
 
         @mcp.tool()
         def analysis_job_results(job_id: str) -> dict[str, Any]:
-            """Keys and summary of what a finished pyTEMlib analysis job (assemble_map, score_map) produced."""
+            """Result of a stitching or scoring job (assemble_map, score_map): result_keys.map and a summary. For a map acquisition use Mapper_results."""
             return tools.jobs.results(job_id)
 
         @mcp.tool()
         def analysis_job_abort(job_id: str) -> dict[str, Any]:
-            """Stop a running pyTEMlib analysis job."""
+            """Stop a running stitching or scoring job (not a map acquisition: use Mapper_abort)."""
             return tools.jobs.abort(job_id)
 
         @mcp.tool()
