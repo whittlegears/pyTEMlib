@@ -200,15 +200,18 @@ class MapTools:
             return {**tools.jobs.start(reserved["reservation_id"]), "estimate": reserved["estimate"]}
 
         @mcp.tool()
-        def score_map(map: str, scorer: str = "baseline", top_k: int = 5, window_m: float | None = None, level: int | None = None) -> dict[str, Any]:
+        def score_map(map: str, scorer: str = "baseline", top_k: int = 5, window_m: float | list[float] | None = None, level: int | None = None) -> dict[str, Any]:
             """Rank regions of a stitched map with a scorer and add the best ones as points of interest, in the background.
 
             map: the map key or path (assemble_map results -> result_keys.map).
             scorer: one of list_scorers(). top_k: how many points of interest to add.
-            window_m: region size in metres (default: a sixth of the map, so about 6 x 6 candidate regions).
+            window_m: side of a square region in metres (default: a sixth of the map, so about 6 x 6 candidate regions).
             Returns a job_id; analysis_job_results(job_id).summary.added_pois lists the new points.
             """
             plan = {"task": "score_map", "map": map, "scorer": scorer, "top_k": top_k}
+            if isinstance(window_m, list):
+                # Models often write a size as [width, height]; regions are square, so use the larger side.
+                window_m = max((float(v) for v in window_m), default=None)
             if window_m:
                 plan["window_m"] = window_m
             if level is not None:
