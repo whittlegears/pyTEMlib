@@ -12,6 +12,7 @@ import io
 import json
 import time
 import uuid
+import weakref
 from typing import Any
 
 import numpy as np
@@ -26,6 +27,9 @@ from .jobs import JobRunner
 from .map_store import MapStore, pixel_to_stage, stage_box_to_pixels
 
 PREVIEW_MAX_SIDE = 512
+
+# FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
+_REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
 
 
 def _png(array: np.ndarray, max_side: int = PREVIEW_MAX_SIDE) -> bytes:
@@ -56,7 +60,8 @@ class MapTools:
 
     # -------------------------------------------------------------- tasks
     def _check_assemble(self, plan: dict) -> dict:
-        run = self.store.open_run(plan["run"], plan.get("box_m"))
+        # Metadata and shapes only: reading every tile image here would block the request; _run_assemble loads them.
+        run = self.store.scan_run(plan["run"], plan.get("box_m"))
         return {"steps": len(run.tiles) + 1, "tiles": len(run.tiles)}
 
     def _run_assemble(self, plan: dict, progress) -> dict:
@@ -106,7 +111,6 @@ class MapTools:
                 top.append(s)
             if len(top) >= int(plan.get("top_k", 5)):
                 break
-        pois = list(meta.get("pois", []))
         added = []
         for s in top:
             x, y = pixel_to_stage(meta, s["row"] + s["window"] / 2.0, s["col"] + s["window"] / 2.0, level)
@@ -114,14 +118,20 @@ class MapTools:
                 "id": uuid.uuid4().hex[:8], "x_m": x, "y_m": y, "kind": "candidate", "source": f"scorer:{scorer.name}",
                 "score": s["value"], "scorer_version": scorer.version, "reason": s["reason"], "window_m": s["window"] * pixel, "links": [],
             }
-            pois.append(poi)
             added.append(poi)
-        self.store.set_pois(plan["map"], pois)
+        self.store.add_pois(plan["map"], added)
         progress(1)
         return {"result_keys": {"map": plan["map"]}, "summary": {"scored_windows": len(scores), "added_pois": added}}
 
     # -------------------------------------------------------------- tools
     def register(self, mcp: FastMCP) -> None:
+        """Add the map tools to ``mcp``. Registering the same MapTools again is a no-op; a second MapTools is refused."""
+        owner = _REGISTERED.get(mcp)
+        if owner is self:
+            return
+        if owner is not None:
+            raise RuntimeError("this FastMCP app already has map tools from another MapTools; build a new app with create_server()")
+        _REGISTERED[mcp] = self
         tools = self
 
         @mcp.tool()
@@ -228,7 +238,7 @@ class MapTools:
             if not (x_min <= x_m <= x_max and y_min <= y_m <= y_max):
                 return {"error": {"code": "outside_map", "message": f"({x_m:.3e}, {y_m:.3e}) is outside the map [{x_min:.3e}, {x_max:.3e}] x [{y_min:.3e}, {y_max:.3e}]"}}
             poi = {"id": uuid.uuid4().hex[:8], "x_m": float(x_m), "y_m": float(y_m), "kind": kind, "source": "agent", "score": None, "scorer_version": None, "reason": reason, "links": list(links or [])}
-            tools.store.set_pois(map, list(meta.get("pois", [])) + [poi])
+            tools.store.add_pois(map, [poi])
             return poi
 
         @mcp.tool()
@@ -239,8 +249,8 @@ class MapTools:
         @mcp.tool()
         def list_tiles(run: str, box_m: list[float] | None = None) -> list[dict[str, Any]]:
             """Tiles of a map run (index, stage position, source key), optionally only those in a stage box."""
-            data = tools.store.open_run(run, box_m)
-            return [{"index": t.index, "stage_xy_m": list(t.stage_xy_m), "shape": list(t.image.shape), "source_key": t.attrs.get("source_key")} for t in data.tiles]
+            data = tools.store.scan_run(run, box_m)
+            return [{"index": t.index, "stage_xy_m": list(t.stage_xy_m), "shape": list(t.shape), "source_key": t.attrs.get("source_key")} for t in data.tiles]
 
         @mcp.tool()
         def jobs_envelope(verb: str, request: str) -> dict[str, Any]:

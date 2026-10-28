@@ -10,7 +10,7 @@ import pytest
 from fastmcp import Client
 
 from pyTEMlib.mcp_server import ENVELOPE_SCHEMA_PATH, create_server
-from test_mosaic import PIXEL, TILE, make_tiles
+from .test_mosaic import PIXEL, TILE, make_tiles
 
 
 @pytest.fixture
@@ -112,3 +112,93 @@ def test_scorers_listed(client):
     scorers = call(c, "list_scorers")
     scorers = scorers["result"] if isinstance(scorers, dict) else scorers
     assert any(s["name"] == "baseline" for s in scorers)
+
+
+def test_level_shapes_stored_and_pixel_stage_round_trip_above_level_0(client, run_file):
+    from pyTEMlib.mcp_server.map_store import level_shape_of, pixel_to_stage, stage_box_to_pixels
+
+    c, tools = client
+    map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
+    meta = tools.store.map_metadata(map_key)
+    assert meta["levels"] >= 3
+    legacy = {k: v for k, v in meta.items() if k != "level_shapes"}  # a map written before level_shapes existed
+    for level in range(meta["levels"]):
+        actual = tools.store.level_shape(map_key, level)
+        assert tuple(meta["level_shapes"][level]) == actual
+        assert level_shape_of(meta, level) == actual
+        assert level_shape_of(legacy, level) == actual
+
+    pixel0 = meta["pixel_size_m"]
+    for level in range(1, meta["levels"]):
+        h, w = level_shape_of(meta, level)
+        quarter = 0.25 * pixel0 * 2**level
+        for row, col in [(0, 0), (h // 2, w // 3), (h - 1, w - 1)]:
+            x, y = pixel_to_stage(meta, row, col, level)
+            rows, cols = stage_box_to_pixels(meta, [x - quarter, x + quarter, y - quarter, y + quarter], level)
+            assert (rows.start, rows.stop, cols.start, cols.stop) == (row, row + 1, col, col + 1), (level, row, col)
+        # the whole map at this level, clipped to the stored shape
+        x_min, y_min = pixel_to_stage(meta, -0.5, -0.5)
+        x_max, y_max = pixel_to_stage(meta, meta["canvas_shape"][0] - 0.5, meta["canvas_shape"][1] - 0.5)
+        rows, cols = stage_box_to_pixels(meta, [x_min - 1e-6, x_max + 1e-6, y_min - 1e-6, y_max + 1e-6], level)
+        assert (rows.stop, cols.stop) == (h, w)
+        assert tools.store.read_level(map_key, level, rows, cols).shape == (h, w)
+
+
+def test_concurrent_add_poi_keeps_every_point(client, run_file):
+    import threading
+
+    c, tools = client
+    map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
+    info = call(c, "map_info", map=map_key)
+    x0, x1, y0, y1 = info["stage_box_m"]
+    added = []
+
+    def add(k):
+        added.append(tools.store.add_pois(map_key, [{"id": f"p{k}", "x_m": (x0 + x1) / 2, "y_m": (y0 + y1) / 2, "kind": "note"}]))
+
+    threads = [threading.Thread(target=add, args=(k,)) for k in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    ids = sorted(p["id"] for p in tools.store.map_metadata(map_key)["pois"])
+    assert ids == sorted(f"p{k}" for k in range(16))
+
+
+def test_assemble_check_reads_no_images(client, run_file, monkeypatch):
+    c, tools = client
+    monkeypatch.setattr(tools.store, "open_run", lambda *a, **k: pytest.fail("pre-check loaded tile images"))
+    reserved = tools.jobs.reserve({"task": "assemble_map", "run": run_file})
+    assert reserved["estimate"]["tiles"] == 9
+    tiles = call(c, "list_tiles", run=run_file)
+    tiles = tiles["result"] if isinstance(tiles, dict) else tiles
+    assert len(tiles) == 9 and tiles[0]["shape"] == [TILE, TILE]
+
+
+def test_server_object_exported_and_create_server_repeatable():
+    import pyTEMlib.mcp_server as package
+    from pyTEMlib.mcp_server import mcp
+    from pyTEMlib.mcp_server import basic_tools
+
+    assert mcp is package.default_server()[0]
+    first, first_tools = create_server()
+    second, _ = create_server()
+    assert first is not second
+
+    async def names(server):
+        return sorted(t.name for t in await server.list_tools())
+
+    loop = asyncio.new_event_loop()
+    try:
+        first_names, second_names, basic_names = (loop.run_until_complete(names(s)) for s in (first, second, basic_tools.mcp))
+    finally:
+        loop.close()
+    assert first_names == second_names
+    assert len(first_names) == len(set(first_names))
+    assert "assemble_map" in first_names and "assemble_map" not in basic_names
+    assert set(basic_names) <= set(first_names)
+
+    first_tools.register(first)  # same tools again: no-op
+    with pytest.raises(RuntimeError):
+        _, other_tools = create_server(include_basic=False)
+        other_tools.register(first)

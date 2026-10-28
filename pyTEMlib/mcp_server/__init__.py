@@ -13,10 +13,13 @@ Run it with::
 
     python -m pyTEMlib.mcp_server --tiled http://localhost:9091 --port 8003
 
-``create_server`` builds the same server in-process.
+``create_server`` builds the same server in-process; ``from pyTEMlib.mcp_server import mcp``
+gives a default instance (local files, no Tiled URI) built on first use.
 """
 
 from __future__ import annotations
+
+import threading
 
 from fastmcp import FastMCP
 
@@ -26,16 +29,41 @@ from .map_tools import MapTools
 
 
 def create_server(tiled_uri: str | None = None, api_key: str | None = None, name: str = "pyTEMlib-MCP", include_basic: bool = True) -> tuple[FastMCP, MapTools]:
-    """Build the MCP server; returns (FastMCP app, MapTools) so callers can also use the tools directly."""
+    """Build a new MCP server; returns (FastMCP app, MapTools) so callers can also use the tools directly.
+
+    Every call returns a fresh FastMCP instance, so calling it twice never
+    registers a tool twice. The basic tools are mounted from
+    ``basic_tools.mcp``, which is left unchanged.
+    """
+    mcp = FastMCP(name)
     if include_basic:
         from . import basic_tools
 
-        mcp = basic_tools.mcp
-    else:
-        mcp = FastMCP(name)
+        mcp.mount(basic_tools.mcp)
     tools = MapTools(MapStore(tiled_uri, api_key))
     tools.register(mcp)
     return mcp, tools
 
 
-__all__ = ["ENVELOPE_SCHEMA_PATH", "ENVELOPE_VERSION", "JobRunner", "MapStore", "MapTools", "create_server"]
+_default: tuple[FastMCP, MapTools] | None = None
+_default_lock = threading.Lock()
+
+
+def default_server() -> tuple[FastMCP, MapTools]:
+    """The module-level server (basic + map tools, local files; Tiled API key from the environment), built once."""
+    global _default
+    with _default_lock:
+        if _default is None:
+            _default = create_server()
+        return _default
+
+
+def __getattr__(name: str):
+    # ``from pyTEMlib.mcp_server import mcp`` gives the default server, built on first use
+    # so importing this package does not load the basic tools' dependencies.
+    if name == "mcp":
+        return default_server()[0]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = ["ENVELOPE_SCHEMA_PATH", "ENVELOPE_VERSION", "JobRunner", "MapStore", "MapTools", "create_server", "default_server", "mcp"]

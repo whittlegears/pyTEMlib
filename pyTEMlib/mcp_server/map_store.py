@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import h5py
 import numpy as np
@@ -34,6 +35,31 @@ class RunData:
     run: str
     tiles: list[Tile]
     plan: dict
+
+
+@dataclass
+class TileInfo:
+    """A tile's placement metadata and image shape, without its pixels."""
+
+    index: int
+    stage_xy_m: tuple[float, float]
+    pixel_size_m: float
+    shape: tuple[int, ...]
+    attrs: dict
+    name: str
+
+
+@dataclass
+class RunInfo:
+    run: str
+    tiles: list[TileInfo]
+    plan: dict
+
+
+# Serialises read-modify-write of a map's points of interest within this
+# process. It does NOT protect against several server processes writing the
+# same map; that would need a lock in the store (e.g. Tiled) itself.
+_POI_LOCK = threading.Lock()
 
 
 def _decode(value: Any) -> Any:
@@ -51,12 +77,18 @@ def _decode(value: Any) -> Any:
     return value
 
 
-def _tile_from(index: int, image: np.ndarray, attrs: dict) -> Tile:
+def _tile_info(index: int, name: str, shape: tuple[int, ...], attrs: dict) -> TileInfo:
     attrs = {k: _decode(v) for k, v in attrs.items()}
     stage = attrs.get("stage_reported_m") or attrs.get("commanded_xy_m")
     if stage is None or "pixel_size_m" not in attrs:
         raise ValueError(f"tile {index} has no stage_reported_m/pixel_size_m attributes; cannot place it")
-    return Tile(np.asarray(image), (float(stage[0]), float(stage[1])), float(attrs["pixel_size_m"]), int(attrs.get("index", index)), attrs)
+    if len(shape) < 2:
+        raise ValueError(f"tile {index} is not an image (shape {tuple(shape)})")
+    return TileInfo(int(attrs.get("index", index)), (float(stage[0]), float(stage[1])), float(attrs["pixel_size_m"]), tuple(int(v) for v in shape), attrs, name)
+
+
+def _tile_from(info: TileInfo, image: np.ndarray) -> Tile:
+    return Tile(np.asarray(image), info.stage_xy_m, info.pixel_size_m, info.index, info.attrs)
 
 
 class MapStore:
@@ -94,27 +126,40 @@ class MapStore:
         return Path(run).with_name(self.map_name(run) + ".h5")
 
     # -------------------------------------------------------------- runs
-    def open_run(self, run: str, box_m: list[float] | None = None) -> RunData:
-        tiles: list[Tile] = []
+    def scan_run(self, run: str, box_m: list[float] | None = None) -> RunInfo:
+        """Tile positions and shapes of a run, from metadata only (no pixels are read)."""
+        infos: list[TileInfo] = []
         if self.is_local(run):
             with h5py.File(run, "r") as h5:
                 plan = _decode(h5.attrs.get("plan", "{}")) or {}
                 group = h5["tiles"]
                 for k, name in enumerate(sorted(group)):
-                    tiles.append(_tile_from(k, group[name][()], dict(group[name].attrs)))
+                    infos.append(_tile_info(k, name, group[name].shape, dict(group[name].attrs)))
         else:
             node = self.client[run]
             plan = _decode(dict(node.metadata).get("plan", "{}")) or {}
             group = node["tiles"]
             for k, name in enumerate(sorted(group)):
                 child = group[name]
-                tiles.append(_tile_from(k, child.read(), dict(child.metadata)))
+                infos.append(_tile_info(k, name, tuple(child.shape), dict(child.metadata)))
         if box_m is not None:
             x0, x1, y0, y1 = box_m
-            tiles = [t for t in tiles if x0 <= t.stage_xy_m[0] <= x1 and y0 <= t.stage_xy_m[1] <= y1]
-        if not tiles:
+            infos = [t for t in infos if x0 <= t.stage_xy_m[0] <= x1 and y0 <= t.stage_xy_m[1] <= y1]
+        if not infos:
             raise ValueError(f"run {run!r} has no tiles" + (" in that box" if box_m else ""))
-        return RunData(run, tiles, plan if isinstance(plan, dict) else {})
+        return RunInfo(run, infos, plan if isinstance(plan, dict) else {})
+
+    def open_run(self, run: str, box_m: list[float] | None = None) -> RunData:
+        """Tiles of a run with their images (only tiles inside ``box_m`` are read). Slow for big runs: use in jobs."""
+        info = self.scan_run(run, box_m)
+        if self.is_local(run):
+            with h5py.File(run, "r") as h5:
+                group = h5["tiles"]
+                tiles = [_tile_from(t, group[t.name][()]) for t in info.tiles]
+        else:
+            group = self.client[run]["tiles"]
+            tiles = [_tile_from(t, group[t.name].read()) for t in info.tiles]
+        return RunData(run, tiles, info.plan)
 
     # -------------------------------------------------------------- maps
     def write_map(self, run: str, levels: list[np.ndarray], placement: Placement, extra: dict | None = None) -> str:
@@ -129,6 +174,7 @@ class MapStore:
             "pixel_size_m": placement.pixel_size_m,
             "origin_xy_m": list(placement.origin_xy_m),
             "canvas_shape": list(placement.canvas_shape),
+            "level_shapes": [list(level.shape[:2]) for level in levels],
             "tile_positions_px": placement.positions_px.round(3).tolist(),
             "matches_used": len(confident),
             "mean_match_confidence": float(np.mean(confident)) if confident else None,
@@ -179,17 +225,54 @@ class MapStore:
                 return tuple(h5[f"level_{level}"].shape)
         return tuple(self.client[map_key][f"level_{level}"].shape)
 
-    def set_pois(self, map_key: str, pois: list[dict]) -> None:
+    def _write_pois(self, map_key: str, pois: list[dict]) -> None:
         if self.is_local(map_key):
             with h5py.File(map_key, "a") as h5:
                 metadata = json.loads(h5.attrs["metadata"])
                 metadata["pois"] = pois
                 h5.attrs["metadata"] = json.dumps(metadata)
             return
-        node = self.client[map_key]
+        node = self.client[map_key]  # fetched fresh, so the rest of the metadata is current
         metadata = dict(node.metadata)
         metadata["pois"] = pois
         node.replace_metadata(metadata=metadata) if hasattr(node, "replace_metadata") else node.update_metadata(metadata=metadata)
+
+    def update_pois(self, map_key: str, change: Callable[[list[dict]], list[dict]]) -> list[dict]:
+        """Apply ``change(current_pois) -> new_pois`` to a map's points of interest and store the result.
+
+        The current list is re-read immediately before writing, under a
+        process-wide lock, so concurrent add_poi / score_map calls in this
+        server cannot lose each other's points. Several server processes
+        writing the same map are not covered (see ``_POI_LOCK``).
+        """
+        with _POI_LOCK:
+            pois = change(list(self.map_metadata(map_key).get("pois", [])))
+            self._write_pois(map_key, pois)
+            return pois
+
+    def add_pois(self, map_key: str, new: list[dict]) -> list[dict]:
+        """Append points of interest; returns the stored list."""
+        return self.update_pois(map_key, lambda current: current + list(new))
+
+    def set_pois(self, map_key: str, pois: list[dict]) -> None:
+        """Replace all points of interest (use ``add_pois``/``update_pois`` to keep concurrent additions)."""
+        self.update_pois(map_key, lambda _current: list(pois))
+
+
+def level_shape_of(metadata: dict, level: int) -> tuple[int, int]:
+    """(rows, cols) of pyramid ``level``: the stored ``level_shapes`` when the map has them.
+
+    Maps written before ``level_shapes`` was stored fall back to computing it
+    from ``canvas_shape`` with the pyramid writer's rule (rows round up,
+    columns round down at each halving).
+    """
+    shapes = metadata.get("level_shapes")
+    if shapes and 0 <= level < len(shapes):
+        return int(shapes[level][0]), int(shapes[level][1])
+    h, w = (int(v) for v in metadata["canvas_shape"])
+    for _ in range(level):
+        h, w = (h + 1) // 2, max(1, w // 2)
+    return h, w
 
 
 def stage_box_to_pixels(metadata: dict, box_m: list[float], level: int) -> tuple[slice, slice]:
@@ -197,7 +280,7 @@ def stage_box_to_pixels(metadata: dict, box_m: list[float], level: int) -> tuple
     scale = 2**level
     p0 = metadata["pixel_size_m"]
     ox, oy = metadata["origin_xy_m"]
-    h, w = (int(np.ceil(v / scale)) for v in metadata["canvas_shape"])
+    h, w = level_shape_of(metadata, level)
     x0, x1, y0, y1 = box_m
 
     def index(value: float, origin: float, limit: int, round_up: bool) -> int:
@@ -209,7 +292,11 @@ def stage_box_to_pixels(metadata: dict, box_m: list[float], level: int) -> tuple
 
 
 def pixel_to_stage(metadata: dict, row: float, col: float, level: int = 0) -> tuple[float, float]:
-    """Stage (x, y) of the centre of pixel (row, col) of ``level``."""
+    """Stage (x, y) of the centre of pixel (row, col) of ``level``.
+
+    Level-k pixel (r, c) averages level-0 pixels [r*2^k, (r+1)*2^k) x [c*2^k, (c+1)*2^k),
+    so this does not depend on the level's shape; ``level_shape_of`` gives that shape.
+    """
     scale = 2**level
     p0 = metadata["pixel_size_m"]
     ox, oy = metadata["origin_xy_m"]

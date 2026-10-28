@@ -73,11 +73,11 @@ pyTEMlib = "pyTEMlib:main"
 # Map tools of the MCP server: Tiled client for reading runs and writing maps.
 mcp = [
     "tiled[client]",
-    "jsonschema",
 ]
 test = [
     "pytest",
-    "pytest-runner"
+    "pytest-runner",
+    "jsonschema",  # tests/test_mcp_map_tools.py validates job replies against the envelope schema
 ]
 
 [tool.setuptools]
