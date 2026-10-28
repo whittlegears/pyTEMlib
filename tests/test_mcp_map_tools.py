@@ -106,9 +106,6 @@ def test_stitch_view_score_and_annotate(client, run_file):
     assert len(added) == 3 and added[0]["score"] >= added[-1]["score"]
     assert all(x0 <= p["x_m"] <= x1 and y0 <= p["y_m"] <= y1 for p in added)
     assert added[0]["scorer_version"] == "1.0.0"
-    # A window written as [width, height] is accepted (small models do this).
-    as_pair = call(c, "score_map", map=map_key, top_k=1, window_m=[100 * PIXEL, 80 * PIXEL], level=0)
-    assert finish(c, tools, as_pair["job_id"])["summary"]["added_pois"]
 
     poi = call(c, "add_poi", map=map_key, x_m=(x0 + x1) / 2, y_m=(y0 + y1) / 2, kind="eds_point", reason="spectrum here", links=["spectrum_001.h5"])
     assert poi["links"] == ["spectrum_001.h5"]
@@ -118,6 +115,10 @@ def test_stitch_view_score_and_annotate(client, run_file):
     pois = pois["result"] if isinstance(pois, dict) else pois
     assert len(pois) == 4
     assert [p["kind"] for p in pois].count("eds_point") == 1
+
+    # A window written as [width, height] is accepted (small models do this).
+    as_pair = call(c, "score_map", map=map_key, top_k=1, window_m=[100 * PIXEL, 80 * PIXEL], level=0)
+    assert finish(c, tools, as_pair["job_id"])["summary"]["added_pois"]
 
 
 def test_bad_run_is_refused_through_the_envelope(client, tmp_path):
