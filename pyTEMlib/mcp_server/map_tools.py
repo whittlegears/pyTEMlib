@@ -244,15 +244,25 @@ class MapTools:
         tools = self
 
         @mcp.tool()
-        def assemble_map(run: str, refine: bool = True, box_m: list[float] | None = None) -> dict[str, Any]:
+        def assemble_map(
+            run: str,
+            refine: bool = True,
+            box_m: list[float] | None = None,
+            stage_sigma_m: float = 2e-7,
+            max_drift_m_per_s: float = 0.0,
+            eds_pois: bool = True,
+        ) -> dict[str, Any]:
             """Stitch a map run into a zoomable multi-resolution map, in the background.
 
             run: the run's Tiled key or file path (Mapper results -> result_keys.run or run_file).
             refine: refine stage positions by matching overlaps (turn off for blank samples).
             box_m: optional [x_min, x_max, y_min, y_max] stage box (metres) to stitch only part.
+            stage_sigma_m: 1-sigma error of the reported stage positions; bounds the overlap search.
+            max_drift_m_per_s: most the sample drifts (m/s); above 0 a drift over time is fitted.
+            eds_pois: mark every EDS point spectrum of the run as a point of interest linked to it.
             Returns a job_id; poll analysis_job_status, then analysis_job_results gives result_keys.map.
             """
-            plan = {"task": "assemble_map", "run": run, "refine": refine}
+            plan = {"task": "assemble_map", "run": run, "refine": refine, "stage_sigma_m": stage_sigma_m, "max_drift_m_per_s": max_drift_m_per_s, "eds_pois": eds_pois}
             if box_m:
                 plan["box_m"] = box_m
             reserved = tools.jobs.reserve(plan)
