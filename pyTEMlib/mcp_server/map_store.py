@@ -558,9 +558,15 @@ class MapStore:
         else:
             meta = dict(self.client[map_key].metadata)
         if meta.get("kind") != "stitched_map":
+            try:
+                stitched = self.current_map(map_key)
+            except Exception:  # not a run either: no stitched map to name
+                stitched = None
+            if stitched:
+                raise ValueError(f"{map_key} is a Mapper run, not a stitched map; its stitched map is {stitched!r}: pass that.")
             raise ValueError(
-                f"{map_key} is not a stitched map (a Mapper run is not one); stitch it with assemble_map "
-                "and pass the key from its results (result_keys.map)."
+                f"{map_key} is not a stitched map (a Mapper run is not one, and this one has not been stitched); "
+                f"stitch it with assemble_map(run={map_key!r}) and pass the key from its results (result_keys.map)."
             )
         return meta
 

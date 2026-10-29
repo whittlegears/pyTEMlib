@@ -261,6 +261,26 @@ class MapTools:
         progress(1)
         return {"result_keys": {"map": plan["map"]}, "summary": {"scored_windows": len(scores), "added_pois": added}}
 
+    def map_info(self, map_key: str) -> dict[str, Any]:
+        meta = self.store.map_metadata(map_key)
+        h, w = meta["canvas_shape"]
+        x_min, y_min = pixel_to_stage(meta, -0.5, -0.5)
+        x_max, y_max = pixel_to_stage(meta, h - 0.5, w - 0.5)
+        return {
+            "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
+            "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
+            "points_of_interest": self.store.poi_count(map_key),
+            "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "drift") if k in meta},
+        }
+
+    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
+        """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter."""
+        limit = max(0, int(limit))
+        if box_m is None and kind is None:
+            return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
+        pois = self.store.list_pois(map_key, kind=kind, box_m=box_m)
+        return {"total": len(pois), "pois": pois[:limit]}
+
     # -------------------------------------------------------------- tools
     def register(self, mcp: FastMCP) -> None:
         """Add the map tools to ``mcp``. Registering the same MapTools again is a no-op; a second MapTools is refused."""
@@ -346,17 +366,10 @@ class MapTools:
 
         @mcp.tool()
         def map_info(map: str) -> dict[str, Any]:
-            """Size, levels, stage extent and number of points of interest of a stitched map."""
-            meta = tools.store.map_metadata(map)
-            h, w = meta["canvas_shape"]
-            x_min, y_min = pixel_to_stage(meta, -0.5, -0.5)
-            x_max, y_max = pixel_to_stage(meta, h - 0.5, w - 0.5)
-            return {
-                "map": map, "run": meta.get("run"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
-                "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
-                "points_of_interest": tools.store.poi_count(map),
-                "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "drift") if k in meta},
-            }
+            """Tiles, size, levels, stage extent and number of points of interest of a stitched map.
+
+            Given a Mapper run instead, the refusal names the run's stitched map."""
+            return tools.map_info(map)
 
         @mcp.tool()
         def get_region(map: str, box_m: list[float], level: int | None = None) -> ToolResult:
@@ -384,13 +397,9 @@ class MapTools:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
             box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read).
-            At most ``limit`` are returned; ``total`` says how many match.
+            Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape.
             """
-            limit = max(0, int(limit))
-            if box_m is None and kind is None:
-                return {"total": tools.store.poi_count(map), "pois": tools.store.list_pois(map, limit=limit)}
-            pois = tools.store.list_pois(map, kind=kind, box_m=box_m)
-            return {"total": len(pois), "pois": pois[:limit]}
+            return tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
 
         @mcp.tool()
         def add_poi(map: str, x_m: float, y_m: float, kind: str = "note", reason: str = "", links: list[str] | None = None, id: str | None = None) -> dict[str, Any]:

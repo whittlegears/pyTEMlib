@@ -351,3 +351,30 @@ def test_status_can_wait_for_the_job(client, run_file):
     jsonschema.validate(status, envelope("status_response"))
     unknown = call(c, "analysis_job_status", job_id="nope", wait_s=1)
     assert unknown["error"]["code"] == "unknown_job" and "Mapper_start" in unknown["error"]["message"]
+
+
+def test_map_info_names_the_runs_stitched_map_and_counts_tiles(client, run_file):
+    c, tools = client
+    with pytest.raises(Exception, match="not been stitched.*assemble_map"):
+        call(c, "map_info", map=run_file)
+    map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
+    with pytest.raises(Exception, match=r"is a Mapper run, not a stitched map; its stitched map is .*_map\.h5"):
+        call(c, "map_info", map=run_file)
+    with pytest.raises(ValueError, match="its stitched map is"):
+        tools.store.map_metadata(run_file)
+    info = call(c, "map_info", map=map_key)
+    assert info["tiles"] == 9 and info["run"] == run_file
+
+
+def test_list_pois_always_answers_total_and_pois(client, run_file):
+    c, tools = client
+    map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
+    x0, x1, y0, y1 = call(c, "map_info", map=map_key)["stage_box_m"]
+    for k in range(5):
+        call(c, "add_poi", map=map_key, x_m=x0 + (k + 1) * (x1 - x0) / 7, y_m=(y0 + y1) / 2, kind="note" if k % 2 else "eds_point")
+    for args in ({}, {"kind": "note"}, {"box_m": [x0, (x0 + x1) / 2, y0, y1]}, {"kind": "eds_point", "limit": 1}):
+        reply = call(c, "list_pois", map=map_key, **args)
+        assert set(reply) == {"total", "pois"} and reply == tools.list_pois(map_key, **args)
+        assert len(reply["pois"]) == min(reply["total"], args.get("limit", 200))
+    assert call(c, "list_pois", map=map_key)["total"] == 5
+    assert call(c, "list_pois", map=map_key, kind="eds_point", limit=1)["total"] == 3
