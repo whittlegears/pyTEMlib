@@ -3,17 +3,34 @@
   "$id": "https://github.com/pycroscopy/asyncroscopy/contracts/envelope.schema.json",
   "title": "ATHENA job envelope",
   "description": "Request and response shapes for any long-running instrument or analysis job: reserve, start, status, abort, results, release. Every verb takes and returns one JSON object. Shared by asyncroscopy devices and the pyTEMlib MCP server; other instruments implement the same verbs.",
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "$defs": {
     "state": {
-      "enum": ["reserved", "queued", "running", "paused_awaiting_approval", "aborting", "done", "failed", "aborted", "released"]
+      "enum": ["reserved", "queued", "running", "paused_awaiting_approval", "paused_suspended", "aborting", "done", "failed", "aborted", "released"]
     },
     "error": {
       "type": "object",
       "required": ["code", "message"],
       "properties": {
         "code": {"type": "string"},
-        "message": {"type": "string"}
+        "message": {"type": "string"},
+        "violations": {
+          "type": "array",
+          "description": "With plan_rejected from a limit check: steps whose values fall outside the instrument's limits (the first 20).",
+          "items": {
+            "type": "object",
+            "required": ["step", "value"],
+            "properties": {
+              "step": {"type": "integer", "minimum": 0},
+              "device": {"type": "string"},
+              "attribute": {"type": "string"},
+              "value": {"type": "number"},
+              "min": {"type": ["number", "null"]},
+              "max": {"type": ["number", "null"]}
+            }
+          }
+        },
+        "violations_total": {"type": "integer", "minimum": 0}
       }
     },
     "reserve_request": {
@@ -38,6 +55,14 @@
             "steps": {"type": "integer", "minimum": 0},
             "duration_s": {"type": "number", "minimum": 0},
             "max_dose_e_per_a2": {"type": "number", "minimum": 0}
+          }
+        },
+        "limits": {
+          "type": "object",
+          "description": "Present when the device checked its steps against limits: how many values were checked, and targets whose limits could not be read.",
+          "properties": {
+            "targets": {"type": "integer", "minimum": 0},
+            "unchecked": {"type": "array", "items": {"type": "object", "properties": {"target": {"type": "string"}, "reason": {"type": "string"}}}}
           }
         }
       }
@@ -77,7 +102,22 @@
           }
         },
         "last_error": {"anyOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]},
-        "pending_request_id": {"type": ["string", "null"]}
+        "pending_request_id": {"type": ["string", "null"]},
+        "suspended": {
+          "description": "While paused_suspended: why (a condition such as beam current is out of range), since when, and, once conditions are good again, seconds until it resumes.",
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["reason"],
+              "properties": {
+                "reason": {"type": "string"},
+                "since": {"type": "number"},
+                "resumes_in_s": {"type": "number", "minimum": 0}
+              }
+            },
+            {"type": "null"}
+          ]
+        }
       }
     },
     "results_response": {
