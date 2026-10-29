@@ -13,25 +13,30 @@ layout) is one HDF5 file. Two layouts are read:
 * layout 1 (no attribute): ``tiles/tile_NNNNN`` datasets whose attributes
   carry ``stage_reported_m`` and ``pixel_size_m``. Fine for small runs.
 
-Tiles are read lazily in chunks of consecutive indices through a cache of
-bounded size, so stitching never holds the whole run in memory.
+A run is held as arrays (positions, shapes, times), not an object per tile,
+and its tiles are read lazily in chunks of consecutive indices through a
+cache of bounded size (``TileSource``, which counts its reads).
 
-The stitched map is stored next to the run as ``<run>_map``: ``level_0`` ..
-``level_N`` chunked arrays (each half the size of the one before), written
-block by block as the stitcher makes them, plus metadata holding the
-pixel-to-stage transform and the stitching quality. Its points of interest
-live in a ``poi`` layer beside the levels, in batches (one per add), so
-adding points costs the size of the batch, not of every point so far.
+The stitched map is stored next to the run: ``level_0`` .. ``level_N``
+chunked arrays (each half the size of the one before), written block by
+block as the stitcher makes them, plus metadata holding the pixel-to-stage
+transform and the stitching quality. A re-stitch writes a complete new map
+before the old one is removed (a new file swapped in atomically, or a new
+Tiled key), so a failed re-stitch never loses the old map or its points.
+
+Points of interest live in a layer beside the levels, built for maps with a
+million of them: EDS points are kept in a grid of spatial cells (each with
+its count), so a query for a stage box reads only the cells it touches and a
+count reads no points; the few other points (scored regions, high
+magnification images, notes) are kept together as "highlights". Adding
+points costs the points added; replacing them builds a new layer and switches
+to it in one metadata update.
 
 The same functions work against a Tiled server (keys) or the filesystem
 (paths). Local paths are accepted only under the store's ``local_roots``
 (default: the working directory), so a client cannot read, or write a map
 next to, an arbitrary HDF5 file on the host. This module never imports
 asyncroscopy.
-
-Re-stitching a run replaces its map's pixels and transform but keeps the
-map's points of interest: they are stage coordinates, so they stay valid
-after the tiles are re-registered.
 """
 
 from __future__ import annotations
@@ -43,9 +48,9 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 import h5py
 import numpy as np
@@ -54,40 +59,50 @@ AXES = "rows=+y, columns=+x; stage coordinates in metres"
 CHUNK_TILES = 32  # tiles read per request
 CACHE_BYTES = 512 * 2**20  # tile images kept in memory while stitching
 V1_EXPORT_MAX_TILES = 20_000  # a layout-1 run from Tiled is exported in one request up to this size
-POI_BATCH = "batch_"
-
-
-@dataclass
-class TileInfo:
-    """A tile's placement metadata and image shape, without its pixels."""
-
-    index: int
-    stage_xy_m: tuple[float, float]
-    pixel_size_m: float
-    shape: tuple[int, ...]
-    attrs: dict
-    name: str | int
-    acquired_s: float | None = None
+POI_CELLS = 64  # the POI layer's grid is POI_CELLS x POI_CELLS cells over the map
+CELL_KINDS = {"eds_point"}  # kinds kept in spatial cells; every other kind is a highlight
+HIGHLIGHTS = "highlights"
 
 
 @dataclass
 class RunInfo:
+    """A run's tiles as arrays: one row per tile (only tiles that were written)."""
+
     run: str
-    tiles: list[TileInfo]
     plan: dict
-    layout: int = 1
+    layout: int
+    index: np.ndarray  # (n,) tile index in the run
+    stage_xy_m: np.ndarray  # (n, 2)
+    shapes: np.ndarray  # (n, 2)
+    pixel_sizes_m: np.ndarray  # (n,)
+    acquired_s: np.ndarray | None  # (n,) or None when unknown
+    names: list = field(default_factory=list)  # layout 1: dataset names
+    row_col: np.ndarray | None = None
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def select(self, keep: np.ndarray) -> "RunInfo":
+        return RunInfo(
+            self.run, self.plan, self.layout, self.index[keep], self.stage_xy_m[keep], self.shapes[keep], self.pixel_sizes_m[keep],
+            None if self.acquired_s is None else self.acquired_s[keep],
+            [n for n, k in zip(self.names, keep) if k] if self.names else [],
+            None if self.row_col is None else self.row_col[keep],
+        )
 
 
 class LazyTile:
-    """A tile whose image is read from its run when first needed (see ``TileSource``)."""
+    """One tile, made on demand; its image is read from the run when first needed (see ``TileSource``)."""
 
-    def __init__(self, info: TileInfo, source: "TileSource", position: int):
-        self.stage_xy_m = info.stage_xy_m
-        self.pixel_size_m = info.pixel_size_m
-        self.index = info.index
-        self.attrs = info.attrs
-        self.acquired_s = info.acquired_s
-        self.shape = tuple(info.shape[:2])
+    __slots__ = ("stage_xy_m", "pixel_size_m", "index", "acquired_s", "shape", "attrs", "_source", "_position")
+
+    def __init__(self, info: RunInfo, source: "TileSource", position: int):
+        self.stage_xy_m = (float(info.stage_xy_m[position, 0]), float(info.stage_xy_m[position, 1]))
+        self.pixel_size_m = float(info.pixel_sizes_m[position])
+        self.index = int(info.index[position])
+        self.acquired_s = None if info.acquired_s is None else float(info.acquired_s[position])
+        self.shape = (int(info.shapes[position, 0]), int(info.shapes[position, 1]))
+        self.attrs = {} if info.row_col is None else {"row": int(info.row_col[position, 0]), "col": int(info.row_col[position, 1])}
         self._source = source
         self._position = position
 
@@ -96,10 +111,33 @@ class LazyTile:
         return self._source.image(self._position)
 
 
+class LazyTiles:
+    """The tiles of a run as a sequence: arrays for placement, images on demand."""
+
+    def __init__(self, info: RunInfo, source: "TileSource"):
+        self.info, self.source = info, source
+
+    def __len__(self) -> int:
+        return len(self.info)
+
+    def __getitem__(self, position: int) -> LazyTile:
+        if position < 0:
+            position += len(self.info)
+        if not 0 <= position < len(self.info):
+            raise IndexError(position)
+        return LazyTile(self.info, self.source, position)
+
+    def __iter__(self):
+        return (self[k] for k in range(len(self)))
+
+    def arrays(self) -> dict:
+        return {"stage_xy_m": self.info.stage_xy_m, "shapes": self.info.shapes, "pixel_sizes_m": self.info.pixel_sizes_m, "acquired_s": self.info.acquired_s}
+
+
 @dataclass
 class RunData:
     run: str
-    tiles: Sequence[LazyTile]
+    tiles: LazyTiles
     plan: dict
     source: "TileSource"
 
@@ -111,10 +149,9 @@ class LocalPathRefused(ValueError):
     """A local file path outside the store's ``local_roots``."""
 
 
-# Serialises replacing a map's points of interest within this process (adding points is a new
-# batch and needs no lock), and every open of a local map file: HDF5 refuses a file opened for
-# writing in one thread while another has it open. Several server processes replacing the same
-# map's points are not covered; that would need a lock in the store itself.
+# Serialises changes to a map's points of interest within this process, and every open of a
+# local map file: HDF5 refuses a file opened for writing in one thread while another has it
+# open. Several server processes changing the same map's points are not covered.
 _POI_LOCK = threading.RLock()
 
 
@@ -133,19 +170,52 @@ def _decode(value: Any) -> Any:
     return value
 
 
-def _tile_info(index: int, name: str, shape: tuple[int, ...], attrs: dict) -> TileInfo:
-    attrs = {k: _decode(v) for k, v in attrs.items()}
-    stage = attrs.get("stage_reported_m") or attrs.get("commanded_xy_m")
-    if stage is None or "pixel_size_m" not in attrs:
-        raise ValueError(f"tile {index} has no stage_reported_m/pixel_size_m attributes; cannot place it")
-    if len(shape) < 2:
-        raise ValueError(f"tile {index} is not an image (shape {tuple(shape)})")
-    acquired = attrs.get("acquired")
-    return TileInfo(int(attrs.get("index", index)), (float(stage[0]), float(stage[1])), float(attrs["pixel_size_m"]), tuple(int(v) for v in shape), attrs, name, float(acquired) if acquired is not None else None)
+def _layout1_info(run: str, plan: dict, names: list[str], shapes: list, attrs_list: list[dict]) -> RunInfo:
+    rows = []
+    for k, (name, shape, attrs) in enumerate(zip(names, shapes, attrs_list)):
+        attrs = {key: _decode(v) for key, v in attrs.items()}
+        stage = attrs.get("stage_reported_m") or attrs.get("commanded_xy_m")
+        if stage is None or "pixel_size_m" not in attrs:
+            raise ValueError(f"tile {k} has no stage_reported_m/pixel_size_m attributes; cannot place it")
+        if len(shape) < 2:
+            raise ValueError(f"tile {k} is not an image (shape {tuple(shape)})")
+        rows.append((int(attrs.get("index", k)), float(stage[0]), float(stage[1]), int(shape[0]), int(shape[1]), float(attrs["pixel_size_m"]), attrs.get("acquired")))
+    times = [r[6] for r in rows]
+    return RunInfo(
+        run, plan, 1,
+        np.array([r[0] for r in rows], dtype=np.int64),
+        np.array([[r[1], r[2]] for r in rows], dtype=np.float64).reshape(-1, 2),
+        np.array([[r[3], r[4]] for r in rows], dtype=np.int64).reshape(-1, 2),
+        np.array([r[5] for r in rows], dtype=np.float64),
+        None if any(t is None for t in times) else np.array(times, dtype=np.float64),
+        list(names),
+    )
+
+
+def _layout2_info(run: str, plan: dict, shape: tuple[int, ...], tile_attrs: dict, arrays: dict) -> RunInfo:
+    attrs = {k: _decode(v) for k, v in tile_attrs.items()}
+    if "pixel_size_m" not in attrs:
+        raise ValueError("the run's tiles array has no pixel_size_m attribute; cannot place its tiles")
+    n = int(shape[0])
+    written = np.asarray(arrays.get("written", np.ones(n, bool)), dtype=bool)
+    index = np.flatnonzero(written)
+    stage = np.asarray(arrays["stage_reported_m"], dtype=np.float64)[index, :2]
+    acquired = arrays.get("acquired_s")
+    row_col = arrays.get("row_col")
+    return RunInfo(
+        run, plan, 2, index, stage,
+        np.tile(np.array(shape[1:3], dtype=np.int64), (len(index), 1)),
+        np.full(len(index), float(attrs["pixel_size_m"])),
+        None if acquired is None else np.asarray(acquired, dtype=np.float64)[index],
+        [], None if row_col is None else np.asarray(row_col)[index],
+    )
 
 
 class TileSource:
-    """Reads a run's tile images in chunks of consecutive tiles, keeping at most ``CACHE_BYTES`` of them."""
+    """Reads a run's tile images in chunks of consecutive tiles, keeping at most ``CACHE_BYTES`` of them.
+
+    ``reads`` counts the chunk reads, so a caller can see how often each chunk was read.
+    """
 
     def __init__(self, store: "MapStore", run: str, info: RunInfo):
         self.store, self.run, self.info = store, run, info
@@ -154,6 +224,7 @@ class TileSource:
         self._bytes = 0
         self._lock = threading.Lock()
         self._export: str | None = None
+        self.reads = 0
 
     def image(self, position: int) -> np.ndarray:
         chunk = position // CHUNK_TILES
@@ -162,10 +233,11 @@ class TileSource:
             if images is not None:
                 self._cache.move_to_end(chunk)
                 return images[position % CHUNK_TILES]
-        tiles = self.info.tiles[chunk * CHUNK_TILES : (chunk + 1) * CHUNK_TILES]
-        images = self._read(tiles)
+        positions = range(chunk * CHUNK_TILES, min((chunk + 1) * CHUNK_TILES, len(self.info)))
+        images = self._read(positions)
         size = sum(a.nbytes for a in images)
         with self._lock:
+            self.reads += 1
             self._cache[chunk] = images
             self._bytes += size
             while self._bytes > CACHE_BYTES and len(self._cache) > 1:
@@ -173,26 +245,29 @@ class TileSource:
                 self._bytes -= sum(a.nbytes for a in old)
         return images[position % CHUNK_TILES]
 
-    def _read(self, tiles: list[TileInfo]) -> list[np.ndarray]:
-        if self.info.layout >= 2:
-            first, last = tiles[0].name, tiles[-1].name
+    def _read(self, positions: range) -> list[np.ndarray]:
+        info = self.info
+        if info.layout >= 2:
+            indices = info.index[positions.start : positions.stop]
+            first, last = int(indices[0]), int(indices[-1])
             if self.local:
                 with h5py.File(self.run, "r") as h5:
                     block = h5["tiles"][first : last + 1]
             else:
                 block = np.asarray(self.store.client[self.run]["tiles"][first : last + 1])
-            return [np.asarray(block[t.name - first]) for t in tiles]
+            return [np.asarray(block[int(i) - first]) for i in indices]
+        names = info.names[positions.start : positions.stop]
         if self.local:
             with h5py.File(self.run, "r") as h5:
-                return [h5["tiles"][t.name][()] for t in tiles]
-        if len(self.info.tiles) <= V1_EXPORT_MAX_TILES:
+                return [h5["tiles"][name][()] for name in names]
+        if len(info) <= V1_EXPORT_MAX_TILES:
             if self._export is None:
                 self._export = self._export_v1()
             if self._export:
                 with h5py.File(self._export, "r") as h5:
-                    return [h5[t.name][()] for t in tiles]
+                    return [h5[name][()] for name in names]
         group = self.store.client[self.run]["tiles"]
-        return [np.asarray(group[t.name].read()) for t in tiles]
+        return [np.asarray(group[name].read()) for name in names]
 
     def _export_v1(self) -> str:
         """One HDF5 export of a layout-1 run's tiles group (about 13x faster than a request per tile); "" if refused."""
@@ -226,9 +301,12 @@ class TileSource:
 
 
 class _LocalMapWriter:
+    """Writes the new map to a temporary file next to the old one; ``finish`` swaps it in atomically."""
+
     def __init__(self, path: Path):
         self.path = path
-        self.h5 = h5py.File(path, "w")
+        self.tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+        self.h5 = h5py.File(self.tmp, "w")
 
     def create(self, level, shape, dtype, block):
         self.h5.create_dataset(f"level_{level}", shape=shape, dtype=dtype, chunks=(min(block, shape[0]), min(block, shape[1])))
@@ -239,15 +317,29 @@ class _LocalMapWriter:
     def finish(self, metadata: dict) -> str:
         self.h5.attrs["metadata"] = json.dumps(metadata)
         self.h5.close()
+        return str(self.tmp)
+
+    def swap(self) -> str:
+        with _POI_LOCK:
+            os.replace(self.tmp, self.path)
         return str(self.path)
 
     def abandon(self) -> None:
-        self.h5.close()
+        try:
+            self.h5.close()
+        except Exception:
+            pass
+        try:
+            self.tmp.unlink()
+        except OSError:
+            pass
 
 
 class _TiledMapWriter:
-    def __init__(self, container, name: str):
-        self.container, self.name = container, name
+    """Writes the new map under a new key; ``swap`` removes the previous map once the new one is complete."""
+
+    def __init__(self, store: "MapStore", container, name: str, previous: str | None):
+        self.store, self.container, self.name, self.previous = store, container, name, previous
         self.nodes: dict[int, Any] = {}
         self.block = 0
 
@@ -276,8 +368,16 @@ class _TiledMapWriter:
         _replace_metadata(self.container, metadata)
         return self.name
 
+    def swap(self) -> str:
+        if self.previous and self.previous != self.name and self.previous in self.store.client:
+            _delete_node(self.store.client[self.previous])
+        return self.name
+
     def abandon(self) -> None:
-        pass
+        try:
+            _delete_node(self.store.client[self.name])
+        except Exception:
+            pass
 
 
 def _delete_node(node) -> None:
@@ -342,6 +442,17 @@ class MapStore:
     def local_map_path(self, run: str) -> Path:
         return Path(run).with_name(self.map_name(run) + ".h5")
 
+    def current_map(self, run: str) -> str | None:
+        """Key or path of the map stitched from ``run``, or None."""
+        if self.is_local(run):
+            path = self.local_map_path(run)
+            return str(path) if path.exists() else None
+        from tiled.queries import Key
+
+        found = self.client.search(Key("kind") == "stitched_map").search(Key("run") == run)
+        keys = sorted(found.keys())
+        return keys[-1] if keys else None
+
     # -------------------------------------------------------------- runs
     def scan_run(self, run: str, box_m: list[float] | None = None) -> RunInfo:
         """Tile positions and shapes of a run, from metadata only (no pixels are read)."""
@@ -349,12 +460,11 @@ class MapStore:
             with h5py.File(run, "r") as h5:
                 plan = _decode(h5.attrs.get("plan", "{}")) or {}
                 if int(h5.attrs.get("run_layout", 1)) >= 2:
-                    infos = _layout2_infos(h5["tiles"].shape, dict(h5["tiles"].attrs), {k: h5[k][()] for k in ("written", "stage_reported_m", "acquired_s", "row_col") if k in h5})
-                    layout = 2
+                    info = _layout2_info(run, plan, h5["tiles"].shape, dict(h5["tiles"].attrs), {k: h5[k][()] for k in ("written", "stage_reported_m", "acquired_s", "row_col") if k in h5})
                 else:
                     group = h5["tiles"]
-                    infos = [_tile_info(k, name, group[name].shape, dict(group[name].attrs)) for k, name in enumerate(sorted(group))]
-                    layout = 1
+                    names = sorted(group)
+                    info = _layout1_info(run, plan, names, [group[n].shape for n in names], [dict(group[n].attrs) for n in names])
         else:
             node = self.client[run]
             meta = dict(node.metadata)
@@ -362,74 +472,87 @@ class MapStore:
             if int(_decode(meta.get("run_layout", 1)) or 1) >= 2:
                 tiles = node["tiles"]
                 arrays = {k: np.asarray(node[k].read()) for k in ("written", "stage_reported_m", "acquired_s", "row_col") if k in node}
-                infos = _layout2_infos(tuple(tiles.shape), dict(tiles.metadata), arrays)
-                layout = 2
+                info = _layout2_info(run, plan, tuple(tiles.shape), dict(tiles.metadata), arrays)
             else:
                 # One paged listing carries every tile's shape and metadata (not a request per tile).
                 children = dict(node["tiles"].items())
-                infos = [_tile_info(k, name, tuple(children[name].shape), dict(children[name].metadata)) for k, name in enumerate(sorted(children))]
-                layout = 1
+                names = sorted(children)
+                info = _layout1_info(run, plan, names, [tuple(children[n].shape) for n in names], [dict(children[n].metadata) for n in names])
+        info.plan = plan if isinstance(plan, dict) else {}
         if box_m is not None:
             x0, x1, y0, y1 = box_m
-            infos = [t for t in infos if x0 <= t.stage_xy_m[0] <= x1 and y0 <= t.stage_xy_m[1] <= y1]
-        if not infos:
+            xy = info.stage_xy_m
+            info = info.select((xy[:, 0] >= x0) & (xy[:, 0] <= x1) & (xy[:, 1] >= y0) & (xy[:, 1] <= y1))
+        if not len(info):
             raise ValueError(f"run {run!r} has no tiles" + (" in that box" if box_m else ""))
-        return RunInfo(run, infos, plan if isinstance(plan, dict) else {}, layout)
+        return info
+
+    def check_run(self, run: str) -> dict:
+        """Cheap facts about a run (no per-tile data): layout and tile count; raises if it is not a run."""
+        if self.is_local(run):
+            with h5py.File(run, "r") as h5:
+                if "tiles" not in h5:
+                    raise ValueError(f"{run!r} is not a map run (it has no tiles)")
+                layout = int(h5.attrs.get("run_layout", 1))
+                count = int(h5["tiles"].shape[0]) if layout >= 2 else len(h5["tiles"])
+            return {"layout": layout, "tiles": count}
+        node = self.client[run]
+        if "tiles" not in node:
+            raise ValueError(f"{run!r} is not a map run (it has no tiles)")
+        layout = int(_decode(dict(node.metadata).get("run_layout", 1)) or 1)
+        count = int(node["tiles"].shape[0]) if layout >= 2 else len(node["tiles"])
+        return {"layout": layout, "tiles": count}
 
     def open_run(self, run: str, box_m: list[float] | None = None) -> RunData:
         """The run's tiles, read lazily (see ``TileSource``); call ``close`` when done."""
         info = self.scan_run(run, box_m)
         source = TileSource(self, run, info)
-        return RunData(run, [LazyTile(t, source, k) for k, t in enumerate(info.tiles)], info.plan, source)
+        return RunData(run, LazyTiles(info, source), info.plan, source)
 
     # -------------------------------------------------------------- maps
     def map_writer(self, run: str):
-        """A LevelWriter for the map of ``run`` (see mosaic.assemble); pass it to ``write_map`` when assembled.
+        """A LevelWriter for a new map of ``run`` (see mosaic.assemble); pass it to ``write_map`` when assembled.
 
-        An existing map of the run is replaced; read its points first with ``existing_pois`` to keep them.
+        The previous map of the run stays until ``write_map`` has finished the new one.
         """
         if self.is_local(run):
             return _LocalMapWriter(self.local_map_path(run))
-        name = self.map_name(run)
-        if name in self.client:
-            _delete_node(self.client[name])
+        previous = self.current_map(run)
+        name = self.map_name(run) if previous is None else f"{self.map_name(run)}_{time.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:4]}"
         container = self.client.create_container(name, metadata={"kind": "stitching", "run": run})
-        container.create_container("poi", metadata={"kind": "poi_layer"})
-        return _TiledMapWriter(container, name)
+        return _TiledMapWriter(self, container, name, previous)
 
     def write_map(self, run: str, writer, metadata: dict, pois: list[dict]) -> str:
-        """Finish a map written through ``map_writer``: store its metadata and points of interest."""
+        """Finish a map written through ``map_writer``: metadata, the POI layer with ``pois``, then the swap."""
         metadata = {"kind": "stitched_map", "run": run, "axes": AXES, **metadata}
         try:
-            key = writer.finish(metadata)
+            staged = writer.finish(metadata)
         except Exception as exc:
+            writer.abandon()
             if "401" in str(exc) or "permission" in str(exc).lower():
                 raise PermissionError(
                     f"Tiled at {self.tiled_uri} refused to store the map: {exc}. Start this server with the Tiled API key "
                     "(--api-key, or $ASYNCROSCOPY_TILED_API_KEY; an asyncroscopy stack uses 'secret' unless that variable is set)."
                 ) from exc
             raise
-        if pois:
-            self.add_pois(key, pois)
-        return key
+        try:
+            if pois:
+                self.add_pois(staged, pois)
+        except Exception:
+            writer.abandon()
+            raise
+        return writer.swap()
 
     def existing_pois(self, run: str) -> list[dict]:
         """Points of interest of the map previously stitched from ``run`` (empty if there is none)."""
         try:
-            if self.is_local(run):
-                key = str(self.local_map_path(run))
-                if not Path(key).exists():
-                    return []
-            else:
-                key = self.map_name(run)
-                if key not in self.client:
-                    return []
-            return self.list_pois(key)
+            key = self.current_map(run)
+            return self.list_pois(key) if key else []
         except (OSError, KeyError, ValueError):  # unreadable or not a map: nothing to keep
             return []
 
     def map_metadata(self, map_key: str) -> dict:
-        if self.is_local(map_key):
+        if self.is_local(map_key) or map_key.endswith(".tmp"):
             with _POI_LOCK, h5py.File(map_key, "r") as h5:
                 meta = json.loads(h5.attrs["metadata"]) if "metadata" in h5.attrs else {}
         else:
@@ -441,107 +564,204 @@ class MapStore:
             )
         return meta
 
+    def _local(self, map_key: str) -> bool:
+        return map_key.endswith(".tmp") or self.is_local(map_key)
+
     def read_level(self, map_key: str, level: int, rows: slice = slice(None), cols: slice = slice(None)) -> np.ndarray:
-        if self.is_local(map_key):
+        if self._local(map_key):
             with _POI_LOCK, h5py.File(map_key, "r") as h5:
                 return h5[f"level_{level}"][rows, cols]
         return np.asarray(self.client[map_key][f"level_{level}"][rows, cols])
 
     def level_shape(self, map_key: str, level: int) -> tuple[int, int]:
-        if self.is_local(map_key):
+        if self._local(map_key):
             with _POI_LOCK, h5py.File(map_key, "r") as h5:
                 return tuple(h5[f"level_{level}"].shape)
         return tuple(self.client[map_key][f"level_{level}"].shape)
 
     # -------------------------------------------------------------- points of interest
-    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None) -> list[dict]:
-        """Points of interest, optionally of one ``kind`` and inside a stage box [x_min, x_max, y_min, y_max]."""
+    def _grid(self, map_key: str, meta: dict | None = None) -> dict:
+        """The POI layer's cell grid: origin and cell size in metres, cells per side."""
+        meta = meta or self.map_metadata(map_key)
+        h, w = (int(v) for v in meta["canvas_shape"])
+        pixel = float(meta["pixel_size_m"])
+        ox, oy = (float(v) for v in meta["origin_xy_m"])
+        cell = max(h, w) * pixel / POI_CELLS
+        return {"x0": ox - pixel / 2, "y0": oy - pixel / 2, "cell_m": cell, "n": POI_CELLS}
+
+    @staticmethod
+    def _cell_of(grid: dict, x: float, y: float) -> tuple[int, int]:
+        n = grid["n"]
+        i = int(np.clip((y - grid["y0"]) // grid["cell_m"], 0, n - 1))
+        j = int(np.clip((x - grid["x0"]) // grid["cell_m"], 0, n - 1))
+        return i, j
+
+    def _layer_name(self, meta: dict) -> str:
+        return meta.get("poi_layer", "poi")
+
+    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None) -> list[dict]:
+        """Points of interest, optionally of one ``kind`` and inside a stage box [x_min, x_max, y_min, y_max].
+
+        With a box, only the spatial cells the box touches are read.
+        """
         meta = self.map_metadata(map_key)
-        pois = list(_decode(meta.get("pois", [])) or [])  # maps written before the layer kept them here
-        for batch in self._batches(map_key):
-            pois += batch
-        if kind is not None:
-            pois = [p for p in pois if p.get("kind") == kind]
+        out = list(_decode(meta.get("pois", [])) or [])  # maps written before the layer kept them here
+        grid = self._grid(map_key, meta)
+        cells = None
         if box_m is not None:
             x0, x1, y0, y1 = box_m
-            pois = [p for p in pois if x0 <= p["x_m"] <= x1 and y0 <= p["y_m"] <= y1]
-        return pois
+            i0, j0 = self._cell_of(grid, x0, y0)
+            i1, j1 = self._cell_of(grid, x1, y1)
+            cells = {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+        if kind is None or kind not in CELL_KINDS:
+            out += self._read_group(map_key, meta, HIGHLIGHTS)
+        if kind is None or kind in CELL_KINDS:
+            for name in self._cell_names(map_key, meta) if cells is None else [f"c_{i}_{j}" for i, j in sorted(cells)]:
+                out += self._read_group(map_key, meta, name)
+                if limit is not None and box_m is None and kind is None and len(out) >= limit:
+                    break
+        if kind is not None:
+            out = [p for p in out if p.get("kind") == kind]
+        if box_m is not None:
+            x0, x1, y0, y1 = box_m
+            out = [p for p in out if x0 <= p["x_m"] <= x1 and y0 <= p["y_m"] <= y1]
+        return out if limit is None else out[:limit]
+
+    def poi_counts(self, map_key: str) -> dict:
+        """Points per cell and in total, from stored counts (no point is read): {"total", "highlights", "cells": {"i_j": n}, "grid"}."""
+        meta = self.map_metadata(map_key)
+        layer = self._layer_name(meta)
+        cells: dict[str, int] = {}
+        highlights = 0
+        if self._local(map_key):
+            with _POI_LOCK, h5py.File(map_key, "r") as h5:
+                if layer in h5:
+                    for name, group in h5[layer].items():
+                        if name == HIGHLIGHTS:
+                            highlights = int(group.attrs.get("count", 0))
+                        else:
+                            cells[name[2:]] = int(group.attrs.get("count", 0))
+        else:
+            node = self.client[map_key]
+            if layer in node:
+                for name, child in node[layer].items():
+                    count = int(_decode(child.metadata.get("count", 0)) or 0)
+                    if name == HIGHLIGHTS:
+                        highlights = count
+                    else:
+                        cells[name[2:]] = count
+        legacy = len(_decode(meta.get("pois", [])) or [])
+        return {"total": legacy + highlights + sum(cells.values()), "highlights": legacy + highlights, "cells": cells, "grid": self._grid(map_key, meta)}
 
     def poi_count(self, map_key: str) -> int:
-        return len(self.list_pois(map_key))
+        return self.poi_counts(map_key)["total"]
 
-    def _batches(self, map_key: str) -> list[list[dict]]:
-        if self.is_local(map_key):
+    def _cell_names(self, map_key: str, meta: dict) -> list[str]:
+        layer = self._layer_name(meta)
+        if self._local(map_key):
             with _POI_LOCK, h5py.File(map_key, "r") as h5:
-                if "poi" not in h5:
-                    return []
-                return [json.loads(h5["poi"][name].attrs["pois"]) for name in sorted(h5["poi"])]
+                return sorted(n for n in h5[layer] if n != HIGHLIGHTS) if layer in h5 else []
         node = self.client[map_key]
-        if "poi" not in node:
-            return []
-        return [list(_decode(child.metadata.get("pois", [])) or []) for _, child in sorted(node["poi"].items(), key=lambda kv: kv[0])]
+        return sorted(n for n in node[layer]) if layer in node else []
 
-    def add_pois(self, map_key: str, new: list[dict]) -> list[dict]:
-        """Store ``new`` points as one batch of the map's POI layer; returns them."""
+    def _read_group(self, map_key: str, meta: dict, name: str) -> list[dict]:
+        layer = self._layer_name(meta)
+        if self._local(map_key):
+            with _POI_LOCK, h5py.File(map_key, "r") as h5:
+                if layer not in h5 or name not in h5[layer]:
+                    return []
+                return [p for batch in sorted(h5[layer][name]) for p in json.loads(h5[layer][name][batch].attrs["pois"])]
+        node = self.client[map_key]
+        if layer not in node or name not in node[layer]:
+            return []
+        return [p for _, child in sorted(node[layer][name].items(), key=lambda kv: kv[0]) for p in (_decode(child.metadata.get("pois", [])) or [])]
+
+    def add_pois(self, map_key: str, new: list[dict], dedupe: bool = False) -> list[dict]:
+        """Store ``new`` points (EDS points in their spatial cells, others as highlights); returns those stored.
+
+        ``dedupe``: skip points whose id is already on the map, so adding the same points again
+        (a retried or resumed step) stores them once.
+        """
         new = list(new)
         if not new:
             return new
-        self.map_metadata(map_key)  # refuses a key that is not a map
-        name = f"{POI_BATCH}{time.time_ns():020d}_{uuid.uuid4().hex[:6]}"
-        if self.is_local(map_key):
-            with _POI_LOCK, h5py.File(map_key, "a") as h5:
-                h5.require_group("poi").create_group(name).attrs["pois"] = json.dumps(new)
-            return new
+        meta = self.map_metadata(map_key)
+        grid = self._grid(map_key, meta)
+        groups: dict[str, list[dict]] = {}
+        for p in new:
+            name = f"c_{'_'.join(map(str, self._cell_of(grid, p['x_m'], p['y_m'])))}" if p.get("kind") in CELL_KINDS else HIGHLIGHTS
+            groups.setdefault(name, []).append(p)
+        stored: list[dict] = []
+        with _POI_LOCK:
+            for name, points in groups.items():
+                if dedupe:
+                    seen = {p.get("id") for p in self._read_group(map_key, meta, name)}
+                    points = [p for p in points if p.get("id") not in seen]
+                if points:
+                    self._append(map_key, meta, name, points)
+                    stored += points
+        return stored
+
+    def _append(self, map_key: str, meta: dict, name: str, points: list[dict]) -> None:
+        layer = self._layer_name(meta)
+        batch = f"b_{time.time_ns():020d}_{uuid.uuid4().hex[:6]}"
+        if self._local(map_key):
+            with h5py.File(map_key, "a") as h5:
+                group = h5.require_group(layer).require_group(name)
+                group.create_group(batch).attrs["pois"] = json.dumps(points)
+                group.attrs["count"] = int(group.attrs.get("count", 0)) + len(points)
+            return
         node = self.client[map_key]
-        if "poi" not in node:
-            node.create_container("poi", metadata={"kind": "poi_layer"})
-        node["poi"].create_container(name, metadata={"pois": new})
-        return new
+        if layer not in node:
+            node.create_container(layer, metadata={"kind": "poi_layer", "grid": self._grid(map_key, meta)})
+        layer_node = node[layer]
+        if name not in layer_node:
+            layer_node.create_container(name, metadata={"count": 0})
+        group = layer_node[name]
+        group.create_container(batch, metadata={"pois": points})
+        _replace_metadata(group, {"count": int(_decode(group.metadata.get("count", 0)) or 0) + len(points)})
 
     def update_pois(self, map_key: str, change: Callable[[list[dict]], list[dict]]) -> list[dict]:
-        """Replace the map's points with ``change(current)`` (rewrites the layer; adding points needs no rewrite)."""
+        """Replace the map's points with ``change(current)``.
+
+        A new layer is built beside the current one and the map's metadata is switched to it in
+        one update, so readers see either all the old points or all the new ones.
+        """
         with _POI_LOCK:
+            meta = self.map_metadata(map_key)
             pois = change(self.list_pois(map_key))
-            if self.is_local(map_key):
-                with _POI_LOCK, h5py.File(map_key, "a") as h5:
-                    if "poi" in h5:
-                        del h5["poi"]
-                    meta = json.loads(h5.attrs["metadata"])
-                    meta.pop("pois", None)
-                    h5.attrs["metadata"] = json.dumps(meta)
+            old = self._layer_name(meta)
+            fresh = f"poi_{uuid.uuid4().hex[:8]}"
+            staged = {**meta, "poi_layer": fresh}
+            staged.pop("pois", None)
+            self.add_pois_to_layer(map_key, staged, pois)
+            if self._local(map_key):
+                with h5py.File(map_key, "a") as h5:
+                    h5.attrs["metadata"] = json.dumps(staged)
+                    if old in h5:
+                        del h5[old]
             else:
                 node = self.client[map_key]
-                if "poi" in node:
-                    layer = node["poi"]
-                    for key in list(layer):
-                        _delete_node(layer[key])
-                meta = dict(node.metadata)
-                if "pois" in meta:
-                    meta.pop("pois")
-                    _replace_metadata(node, meta)
-        self.add_pois(map_key, pois)
+                _replace_metadata(node, staged)
+                if old in node:
+                    _delete_node(node[old])
         return pois
+
+    def add_pois_to_layer(self, map_key: str, meta: dict, pois: list[dict]) -> None:
+        grid = self._grid(map_key, meta)
+        groups: dict[str, list[dict]] = {}
+        for p in pois:
+            name = f"c_{'_'.join(map(str, self._cell_of(grid, p['x_m'], p['y_m'])))}" if p.get("kind") in CELL_KINDS else HIGHLIGHTS
+            groups.setdefault(name, []).append(p)
+        if not groups and not self._local(map_key):
+            node = self.client[map_key]
+            node.create_container(meta["poi_layer"], metadata={"kind": "poi_layer", "grid": grid})
+        for name, points in groups.items():
+            self._append(map_key, meta, name, points)
 
     def set_pois(self, map_key: str, pois: list[dict]) -> None:
         """Replace all points of interest."""
         self.update_pois(map_key, lambda _current: list(pois))
-
-
-def _layout2_infos(shape: tuple[int, ...], tile_attrs: dict, arrays: dict) -> list[TileInfo]:
-    attrs = {k: _decode(v) for k, v in tile_attrs.items()}
-    if "pixel_size_m" not in attrs:
-        raise ValueError("the run's tiles array has no pixel_size_m attribute; cannot place its tiles")
-    n = int(shape[0])
-    written = np.asarray(arrays.get("written", np.ones(n, bool)), dtype=bool)
-    stage = np.asarray(arrays["stage_reported_m"], dtype=np.float64)
-    acquired = arrays.get("acquired_s")
-    row_col = arrays.get("row_col")
-    pixel = float(attrs["pixel_size_m"])
-    infos = []
-    for k in np.flatnonzero(written):
-        extra = {"row": int(row_col[k][0]), "col": int(row_col[k][1])} if row_col is not None else {}
-        infos.append(TileInfo(int(k), (float(stage[k, 0]), float(stage[k, 1])), pixel, tuple(int(v) for v in shape[1:3]), extra, int(k), float(acquired[k]) if acquired is not None else None))
-    return infos
 
 
 def level_shape_of(metadata: dict, level: int) -> tuple[int, int]:

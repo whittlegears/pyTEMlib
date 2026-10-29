@@ -207,8 +207,7 @@ def test_assemble_check_reads_no_images(client, run_file, monkeypatch):
     reserved = tools.jobs.reserve({"task": "assemble_map", "run": run_file})
     assert reserved["estimate"]["tiles"] == 9
     tiles = call(c, "list_tiles", run=run_file)
-    tiles = tiles["result"] if isinstance(tiles, dict) else tiles
-    assert len(tiles) == 9 and tiles[0]["shape"] == [TILE, TILE]
+    assert tiles["total"] == 9 and tiles["tiles"][0]["shape"] == [TILE, TILE]
 
 
 def test_server_object_exported_and_create_server_repeatable():
@@ -309,18 +308,20 @@ def test_abort_during_registration_stops_promptly(client, run_file, monkeypatch)
 
 
 def test_oversized_map_refused_before_reading_pixels(client_factory, run_file, tmp_path, monkeypatch):
-    c, tools = client_factory(local_roots=[tmp_path], max_canvas_pixels=100_000)
-    monkeypatch.setattr(tools.store, "open_run", lambda *a, **k: pytest.fail("limit checked after loading tile images"))
-    reply = call(c, "assemble_map", run=run_file)
-    jsonschema.validate(reply, envelope("error_response"))
-    assert reply["error"]["code"] == "plan_rejected"
-    assert "megapixels" in reply["error"]["message"] and "box_m" in reply["error"]["message"]
+    from pyTEMlib.mcp_server import map_store
 
-    # a part of the run that fits is accepted, and the estimate gives the canvas size
-    first = tools.store.scan_run(run_file).tiles[0]
-    x, y = first.stage_xy_m
-    reserved = tools.jobs.reserve({"task": "assemble_map", "run": run_file, "box_m": [x - 1e-12, x + 1e-12, y - 1e-12, y + 1e-12]})
-    assert reserved["estimate"]["canvas_shape"] == [TILE, TILE]
+    c, tools = client_factory(local_roots=[tmp_path], max_canvas_pixels=100_000)
+    monkeypatch.setattr(map_store.TileSource, "image", lambda *a, **k: pytest.fail("limit checked after loading tile images"))
+    started = call(c, "assemble_map", run=run_file)  # the request answers at once: the job checks the canvas
+    status = tools.jobs.wait(started["job_id"])
+    assert status["state"] == "failed"
+    assert "megapixels" in status["last_error"]["message"] and "box_m" in status["last_error"]["message"]
+
+    # a part of the run that fits is stitched
+    x, y = tools.store.scan_run(run_file).stage_xy_m[0]
+    monkeypatch.undo()
+    job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": run_file, "box_m": [x - 1e-12, x + 1e-12, y - 1e-12, y + 1e-12]})["reservation_id"])
+    assert tools.jobs.wait(job["job_id"])["state"] == "done"
 
 
 def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path):

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 import time
 import uuid
 import weakref
@@ -42,6 +43,7 @@ from .map_store import MapStore, level_shape_of, pixel_to_stage, stage_box_to_pi
 
 PREVIEW_MAX_SIDE = 512
 MAX_STATUS_WAIT_S = 25.0  # analysis_job_status waits stay under MCP client timeouts
+PROGRESS_STEPS = 1000  # assemble_map reports progress in these units
 DEFAULT_MAX_CANVAS_PIXELS = 400_000_000_000  # level-0 pixels; memory is bounded, so this only catches wrong metadata
 SCORE_MAX_SIDE = 4096  # score_map reads the finest level no larger than this, never a giant level 0 whole
 BLOCK = 512  # pyramid block and chunk side
@@ -70,19 +72,24 @@ def _loads(request: str | dict) -> dict:
 
 
 def eds_pois(run, placement) -> list[dict]:
-    """A point of interest for every EDS point spectrum of a layout-2 run, at its tile's stitched centre."""
+    """A point of interest for every EDS point spectrum of a layout-2 run, at its tile's stitched centre.
+
+    Ids are the run and tile, so stitching the same run again gives the same points.
+    """
     keys = run.source.dataset("spectrum_keys")
     if keys is None:
         return []
+    info = run.tiles.info
+    centres = placement.positions_px + info.shapes / 2.0 - 0.5
+    run_name = Path(str(run.run)).name
     out = []
-    for k, tile in enumerate(run.tiles):
-        key = keys[tile.index]
+    for k, index in enumerate(info.index):
+        key = keys[int(index)]
         key = key.decode() if isinstance(key, bytes) else str(key)
         if not key:
             continue
-        row, col = placement.positions_px[k] + np.array(tile.shape) / 2.0 - 0.5
-        x, y = placement.pixel_to_stage(row, col)
-        out.append({"id": uuid.uuid4().hex[:8], "x_m": float(x), "y_m": float(y), "kind": "eds_point", "source": "run", "score": None, "scorer_version": None, "reason": f"EDS point spectrum of tile {tile.index}", "links": [key]})
+        x, y = placement.pixel_to_stage(centres[k, 0], centres[k, 1])
+        out.append({"id": f"{run_name}:eds:{int(index)}", "x_m": float(x), "y_m": float(y), "kind": "eds_point", "source": "run", "score": None, "scorer_version": None, "reason": f"EDS point spectrum of tile {int(index)}", "links": [key]})
     return out
 
 
@@ -100,6 +107,8 @@ def stitch_quality(placement) -> dict:
         out["p95_residual_px"] = round(float(np.percentile(residuals, 95)), 3)
     if placement.fallback is not None:
         out["fallback_tiles"] = int(placement.fallback.sum())
+    if placement.solver:
+        out["solver"] = placement.solver
     drift = placement.drift_summary()
     if drift is not None:
         out["drift"] = drift
@@ -111,16 +120,17 @@ class MapTools:
         self.store = store
         self.max_canvas_pixels = int(max_canvas_pixels)
         self.jobs = JobRunner()
-        self.jobs.register("assemble_map", self._check_assemble, self._run_assemble)
-        self.jobs.register("score_map", self._check_score, self._run_score)
+        # One job per run's map at a time: a second assemble (a retry after a timeout, a resumed
+        # Mapper) is refused as busy with the running job's id, which the caller then waits for.
+        self.jobs.register("assemble_map", self._check_assemble, self._run_assemble, resource=lambda plan: f"map of {plan['run']}")
+        self.jobs.register("score_map", self._check_score, self._run_score, resource=lambda plan: f"scoring of {plan['map']}")
 
     # -------------------------------------------------------------- tasks
     def _check_assemble(self, plan: dict) -> dict:
-        # Metadata and shapes only: reading every tile image here would block the request; _run_assemble loads them.
-        run = self.store.scan_run(plan["run"], plan.get("box_m"))
-        canvas = stage_canvas_shape([t.stage_xy_m for t in run.tiles], [t.shape[:2] for t in run.tiles], [t.pixel_size_m for t in run.tiles])
-        self._check_canvas(canvas)
-        return {"steps": len(run.tiles) + 1, "tiles": len(run.tiles), "canvas_shape": list(canvas), "canvas_megapixels": round(canvas[0] * canvas[1] / 1e6, 3)}
+        # Constant time, whatever the run's size: the request must answer at once. The job itself
+        # reads the tile positions and checks the canvas before reading any pixel.
+        facts = self.store.check_run(plan["run"])
+        return {"steps": PROGRESS_STEPS, "tiles": facts["tiles"], "layout": facts["layout"]}
 
     def _check_canvas(self, canvas: tuple[int, int]) -> None:
         pixels = int(canvas[0]) * int(canvas[1])
@@ -139,24 +149,33 @@ class MapTools:
             run.close()
 
     def _assemble(self, run, plan: dict, progress) -> dict:
-        # Progress: the overlapping pairs matched (the slow part), then the pyramid blocks written.
-        steps = {"pairs": 0}
+        # Progress in PROGRESS_STEPS units that only go up: registration (both matching passes)
+        # takes the first 70 %, writing the pyramid the next 29 %, storing the map the rest.
+        passes = {"pass": 0, "last": 0}
 
         def on_pair(done: int, total: int) -> None:
-            steps["pairs"] = total
-            progress(done, 2 * total + 1)  # raises Aborted when the job is aborted, which stops registration
+            if done < passes["last"]:
+                passes["pass"] += 1
+            passes["last"] = done
+            share = min(1.0, (passes["pass"] + done / max(total, 1)) / 2.0)
+            progress(int(0.7 * PROGRESS_STEPS * share), PROGRESS_STEPS)  # raises Aborted when the job is aborted
 
-        progress(0, len(run.tiles) + 1)
+        progress(0, PROGRESS_STEPS)
         refine = bool(plan.get("refine", True))
+        info = run.tiles.info
+        self._check_canvas(stage_canvas_shape(info.stage_xy_m, info.shapes, info.pixel_sizes_m))
+        sigma = plan.get("stage_sigma_m")
+        if sigma is None:  # 5 % of the field of view: a stage error a usual 15 % overlap can still absorb
+            sigma = 0.05 * float(np.median(info.shapes[:, 1])) * float(info.pixel_sizes_m[0])
         placement = register_tiles(
             run.tiles,
-            stage_sigma_m=float(plan.get("stage_sigma_m", 200e-9)),
+            stage_sigma_m=float(sigma),
             refine=refine,
             on_pair=on_pair,
             max_drift_m_per_s=float(plan.get("max_drift_m_per_s", 0.0)),
             drift_knot_s=float(plan.get("drift_knot_s", 120.0)),
         )
-        pairs = steps["pairs"]
+        progress(int(0.7 * PROGRESS_STEPS), PROGRESS_STEPS)
         self._check_canvas(placement.canvas_shape)  # refinement can grow the canvas by a few pixels
         pois = self.store.existing_pois(plan["run"])
         if plan.get("eds_pois"):
@@ -166,7 +185,7 @@ class MapTools:
         levels = pyramid_levels(placement.canvas_shape)
         writer = self.store.map_writer(plan["run"])
         try:
-            assemble(run.tiles, placement, writer, block=BLOCK, levels=levels, on_block=lambda done, total: progress(pairs + done * pairs // max(total, 1), 2 * pairs + 1))
+            assemble(run.tiles, placement, writer, block=BLOCK, levels=levels, on_block=lambda done, total: progress(int((0.7 + 0.29 * done / max(total, 1)) * PROGRESS_STEPS), PROGRESS_STEPS))
         except BaseException:
             writer.abandon()
             raise
@@ -181,12 +200,14 @@ class MapTools:
             "tiles": len(run.tiles),
             "stitched_at": time.time(),
             "refined": refine,
+            "stage_sigma_m": float(sigma),
             **quality,
         }
         if len(run.tiles) <= 10_000:  # per-tile positions are kept for small maps; large ones keep the summary only
             metadata["tile_positions_px"] = placement.positions_px.round(3).tolist()
+        progress(int(0.99 * PROGRESS_STEPS), PROGRESS_STEPS)  # last chance to abort before the old map is replaced
         key = self.store.write_map(plan["run"], writer, metadata, pois)
-        progress(2 * pairs + 1)
+        progress(PROGRESS_STEPS, PROGRESS_STEPS)
         summary = {"tiles": len(run.tiles), "levels": levels, "canvas_shape": list(placement.canvas_shape), **quality}
         if plan.get("eds_pois"):
             summary["eds_pois"] = sum(1 for p in pois if p.get("kind") == "eds_point" and p.get("source") == "run")
@@ -220,15 +241,23 @@ class MapTools:
                 top.append(s)
             if len(top) >= int(plan.get("top_k", 5)):
                 break
+        tag = plan.get("tag")
         added = []
-        for s in top:
+        for k, s in enumerate(top):
             x, y = pixel_to_stage(meta, s["row"] + s["window"] / 2.0, s["col"] + s["window"] / 2.0, level)
             poi = {
-                "id": uuid.uuid4().hex[:8], "x_m": x, "y_m": y, "kind": "candidate", "source": f"scorer:{scorer.name}",
+                "id": f"{tag}:region:{k}" if tag else uuid.uuid4().hex[:8], "x_m": x, "y_m": y, "kind": "candidate", "source": f"scorer:{scorer.name}",
                 "score": s["value"], "scorer_version": scorer.version, "reason": s["reason"], "window_m": s["window"] * pixel, "links": [],
             }
+            if tag:
+                poi["tag"] = tag
             added.append(poi)
-        self.store.add_pois(plan["map"], added)
+        progress(0)  # an abort requested while scoring stops here, before any point is written
+        if tag:
+            # The same tag's earlier regions (a retried or resumed scoring) are replaced, not repeated.
+            self.store.update_pois(plan["map"], lambda current: [p for p in current if p.get("tag") != tag] + added)
+        else:
+            self.store.add_pois(plan["map"], added)
         progress(1)
         return {"result_keys": {"map": plan["map"]}, "summary": {"scored_windows": len(scores), "added_pois": added}}
 
@@ -248,7 +277,7 @@ class MapTools:
             run: str,
             refine: bool = True,
             box_m: list[float] | None = None,
-            stage_sigma_m: float = 2e-7,
+            stage_sigma_m: float | None = None,
             max_drift_m_per_s: float = 0.0,
             eds_pois: bool = True,
         ) -> dict[str, Any]:
@@ -257,12 +286,14 @@ class MapTools:
             run: the run's Tiled key or file path (Mapper results -> result_keys.run or run_file).
             refine: refine stage positions by matching overlaps (turn off for blank samples).
             box_m: optional [x_min, x_max, y_min, y_max] stage box (metres) to stitch only part.
-            stage_sigma_m: 1-sigma error of the reported stage positions; bounds the overlap search.
+            stage_sigma_m: 1-sigma error of the reported stage positions; bounds the overlap search (default 5 % of the field of view).
             max_drift_m_per_s: most the sample drifts (m/s); above 0 a drift over time is fitted.
             eds_pois: mark every EDS point spectrum of the run as a point of interest linked to it.
             Returns a job_id; poll analysis_job_status, then analysis_job_results gives result_keys.map.
             """
-            plan = {"task": "assemble_map", "run": run, "refine": refine, "stage_sigma_m": stage_sigma_m, "max_drift_m_per_s": max_drift_m_per_s, "eds_pois": eds_pois}
+            plan = {"task": "assemble_map", "run": run, "refine": refine, "max_drift_m_per_s": max_drift_m_per_s, "eds_pois": eds_pois}
+            if stage_sigma_m is not None:
+                plan["stage_sigma_m"] = stage_sigma_m
             if box_m:
                 plan["box_m"] = box_m
             reserved = tools.jobs.reserve(plan)
@@ -271,15 +302,18 @@ class MapTools:
             return {**tools.jobs.start(reserved["reservation_id"]), "estimate": reserved["estimate"]}
 
         @mcp.tool()
-        def score_map(map: str, scorer: str = "baseline", top_k: int = 5, window_m: float | list[float] | None = None, level: int | None = None) -> dict[str, Any]:
+        def score_map(map: str, scorer: str = "baseline", top_k: int = 5, window_m: float | list[float] | None = None, level: int | None = None, tag: str | None = None) -> dict[str, Any]:
             """Rank regions of a stitched map with a scorer and add the best ones as points of interest, in the background.
 
             map: the map key or path (assemble_map results -> result_keys.map).
             scorer: one of list_scorers(). top_k: how many points of interest to add.
             window_m: side of a square region in metres (default: a sixth of the map, so about 6 x 6 candidate regions).
+            tag: optional; scoring again with the same tag replaces the regions it added before (safe to retry).
             Returns a job_id; analysis_job_results(job_id).summary.added_pois lists the new points.
             """
             plan = {"task": "score_map", "map": map, "scorer": scorer, "top_k": top_k}
+            if tag:
+                plan["tag"] = tag
             if isinstance(window_m, list):
                 # Models often write a size as [width, height]; regions are square, so use the larger side.
                 window_m = max((float(v) for v in window_m), default=None)
@@ -349,16 +383,21 @@ class MapTools:
         def list_pois(map: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
-            box_m: only those inside [x_min, x_max, y_min, y_max]. At most ``limit`` are returned; ``total`` says how many match.
+            box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read).
+            At most ``limit`` are returned; ``total`` says how many match.
             """
+            limit = max(0, int(limit))
+            if box_m is None and kind is None:
+                return {"total": tools.store.poi_count(map), "pois": tools.store.list_pois(map, limit=limit)}
             pois = tools.store.list_pois(map, kind=kind, box_m=box_m)
-            return {"total": len(pois), "pois": pois[: max(0, int(limit))]}
+            return {"total": len(pois), "pois": pois[:limit]}
 
         @mcp.tool()
-        def add_poi(map: str, x_m: float, y_m: float, kind: str = "note", reason: str = "", links: list[str] | None = None) -> dict[str, Any]:
+        def add_poi(map: str, x_m: float, y_m: float, kind: str = "note", reason: str = "", links: list[str] | None = None, id: str | None = None) -> dict[str, Any]:
             """Mark a stage position on a map, e.g. where an EDS spectrum or a high-magnification image was taken.
 
             links: Tiled keys of data acquired there. Refuses points outside the map.
+            id: optional; adding a point with an id already on the map changes nothing (safe to retry).
             """
             meta = tools.store.map_metadata(map)
             h, w = meta["canvas_shape"]
@@ -366,8 +405,8 @@ class MapTools:
             x_max, y_max = pixel_to_stage(meta, h - 0.5, w - 0.5)
             if not (x_min <= x_m <= x_max and y_min <= y_m <= y_max):
                 return {"error": {"code": "outside_map", "message": f"({x_m:.3e}, {y_m:.3e}) is outside the map [{x_min:.3e}, {x_max:.3e}] x [{y_min:.3e}, {y_max:.3e}]"}}
-            poi = {"id": uuid.uuid4().hex[:8], "x_m": float(x_m), "y_m": float(y_m), "kind": kind, "source": "agent", "score": None, "scorer_version": None, "reason": reason, "links": list(links or [])}
-            tools.store.add_pois(map, [poi])
+            poi = {"id": id or uuid.uuid4().hex[:8], "x_m": float(x_m), "y_m": float(y_m), "kind": kind, "source": "agent", "score": None, "scorer_version": None, "reason": reason, "links": list(links or [])}
+            tools.store.add_pois(map, [poi], dedupe=id is not None)
             return poi
 
         @mcp.tool()
@@ -376,10 +415,14 @@ class MapTools:
             return [{"name": s.name, "version": s.version, "description": s.description} for s in available_scorers().values()]
 
         @mcp.tool()
-        def list_tiles(run: str, box_m: list[float] | None = None) -> list[dict[str, Any]]:
-            """Tiles of a map run (index, stage position, source key), optionally only those in a stage box."""
-            data = tools.store.scan_run(run, box_m)
-            return [{"index": t.index, "stage_xy_m": list(t.stage_xy_m), "shape": list(t.shape), "source_key": t.attrs.get("source_key")} for t in data.tiles]
+        def list_tiles(run: str, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
+            """Tiles of a map run (index, stage position, shape), optionally only those in a stage box; at most ``limit``, with the total."""
+            info = tools.store.scan_run(run, box_m)
+            shown = range(min(len(info), max(0, int(limit))))
+            return {
+                "total": len(info),
+                "tiles": [{"index": int(info.index[k]), "stage_xy_m": [float(v) for v in info.stage_xy_m[k]], "shape": [int(v) for v in info.shapes[k]]} for k in shown],
+            }
 
         @mcp.tool()
         def jobs_envelope(verb: str, request: str) -> dict[str, Any]:

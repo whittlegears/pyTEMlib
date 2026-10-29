@@ -51,6 +51,9 @@ MIN_STAGE_SIGMA_PX = 1.0
 HUBER_PX = 0.5  # matches agree with the solution to ~0.1 px; beyond this their weight falls off
 ROBUST_ROUNDS = 10
 DIRECT_SOLVE_MAX = 400_000  # unknowns solved directly; more use lsqr
+LSQR_ITERATIONS = 50_000
+FALLBACK_WEIGHT = 0.25  # blend weight of a tile with no usable match: its neighbours' pixels win where they overlap
+STRIP_PX = 8192  # pairs are matched in vertical strips this wide, so the tiles read stay few (see pairwise_offsets)
 
 
 @dataclass
@@ -87,6 +90,7 @@ class Placement:
     fallback: np.ndarray | None = None  # (n,) True where a tile had no usable match and kept its drift-corrected stage position
     drift_times_s: np.ndarray | None = None  # knot times, seconds after the first tile
     drift_px: np.ndarray | None = None  # (knots, 2) sample drift (row, col) at each knot
+    solver: dict | None = None  # how the last solve went: method, converged, iterations
 
     def pixel_to_stage(self, row: float, col: float) -> tuple[float, float]:
         return (self.origin_xy_m[0] + col * self.pixel_size_m, self.origin_xy_m[1] + row * self.pixel_size_m)
@@ -141,11 +145,29 @@ def stage_canvas_shape(centres_xy_m, shapes, pixel_sizes_m) -> tuple[int, int]:
     return int(np.ceil(extent[0])), int(np.ceil(extent[1]))
 
 
+def tile_arrays(tiles: Sequence[Tile]) -> dict:
+    """Stage centres (n, 2), shapes (n, 2), pixel sizes (n,) and acquisition times (n,) or None of a tile sequence.
+
+    A sequence that has these as arrays already (``arrays()``, e.g. a run read from a
+    store) gives them without making an object per tile.
+    """
+    if hasattr(tiles, "arrays"):
+        return tiles.arrays()
+    times = [t.acquired_s for t in tiles]
+    return {
+        "stage_xy_m": np.array([t.stage_xy_m for t in tiles], dtype=np.float64).reshape(-1, 2),
+        "shapes": np.array([t.shape for t in tiles], dtype=np.int64).reshape(-1, 2),
+        "pixel_sizes_m": np.array([t.pixel_size_m for t in tiles], dtype=np.float64),
+        "acquired_s": None if any(v is None for v in times) else np.asarray(times, dtype=np.float64),
+    }
+
+
 def place_by_stage(tiles: Sequence[Tile]) -> tuple[np.ndarray, float, tuple[float, float]]:
     """Top-left canvas positions (row, col) from stage positions; returns (positions, pixel size, origin)."""
     if not len(tiles):
         raise ValueError("no tiles to place")
-    return stage_layout([t.stage_xy_m for t in tiles], [t.shape for t in tiles], [t.pixel_size_m for t in tiles])
+    arrays = tile_arrays(tiles)
+    return stage_layout(arrays["stage_xy_m"], arrays["shapes"], arrays["pixel_sizes_m"])
 
 
 def overlapping_pairs(positions: np.ndarray, shapes: np.ndarray, min_overlap_px: int = 16) -> list[tuple[int, int, int, int]]:
@@ -249,8 +271,13 @@ def pairwise_offsets(
     ``on_pair(done, total)`` is called before each overlapping pair is matched
     and once at the end; it may raise (e.g. a job's abort) to stop early.
     """
-    shapes = np.array([t.shape for t in tiles])
+    shapes = tile_arrays(tiles)["shapes"]
     pairs = overlapping_pairs(positions, shapes, min_overlap_px)
+    # Match strip by strip (vertical strips STRIP_PX wide), top to bottom within each: the tiles
+    # a pair needs are then the current and the previous row of one strip, so a bounded tile
+    # cache reads each block of tiles about once however wide the map is.
+    strip = (positions[:, 1] // STRIP_PX).astype(np.int64)
+    pairs.sort(key=lambda p: (strip[p[0]], positions[p[0], 0], positions[p[0], 1], p[1]))
     times = _times(tiles)
     sigma = max(stage_sigma_px, MIN_STAGE_SIGMA_PX) if stage_sigma_px is not None else 0.1 * float(np.median(shapes))
     matches: list[PairMatch] = []
@@ -283,10 +310,9 @@ def pairwise_offsets(
 
 def _times(tiles: Sequence[Tile]) -> np.ndarray | None:
     """Acquisition times relative to the first tile, or None if any tile lacks one."""
-    times = [t.acquired_s for t in tiles]
-    if any(v is None for v in times):
+    times = tile_arrays(tiles)["acquired_s"]
+    if times is None or not np.isfinite(times).all():
         return None
-    times = np.asarray(times, dtype=np.float64)
     return times - times.min()
 
 
@@ -321,6 +347,7 @@ def solve_positions(
     drift_knot_s: float = 120.0,
     max_drift_px_per_s: float = 0.0,
     bound_sigmas: float = 3.5,
+    info: dict | None = None,
 ) -> tuple[np.ndarray, list[PairMatch], np.ndarray | None, np.ndarray | None]:
     """Weighted least squares over tile positions and (with times) a piecewise-linear drift.
 
@@ -336,7 +363,7 @@ def solve_positions(
     used = [m for m in matches if m.confidence >= min_confidence]
     knots = _knots(times_s, drift_knot_s, len(stage_positions)) if max_drift_px_per_s > 0 else None
     robust = np.ones(len(used))
-    positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust)
+    positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
     # A match must also agree with the stage once the fitted drift is removed: the two stage
     # readings differ by at most bound_sigmas combined stage sigmas. This catches a wrong peak in a
     # low-texture overlap that nothing else contradicts (its only other constraint is the weak prior).
@@ -362,13 +389,20 @@ def solve_positions(
             break
         used = [m for m, k in zip(used, keep) if k]
         robust = new_robust
-        positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust)
+        positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
     return positions, used, knots, drift
 
 
-def _solve_once(stage_positions, matches, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust):
+def _solve_once(stage_positions, matches, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info=None):
+    """One weighted least-squares solve; returns (positions, drift at knots or None).
+
+    The drift at the first knot is fixed at zero by leaving it out of the
+    unknowns (a heavily weighted anchor equation would ill-condition the
+    system). Columns are scaled to unit norm before an iterative solve.
+    """
     n = len(stage_positions)
     k_count = 0 if knots is None else len(knots)
+    free = max(k_count - 1, 0)  # drift unknowns: knots 1 .. K-1
     rows, cols, vals = [], [], []
     rhs: list[np.ndarray] = []
     w_stage = 1.0 / max(stage_sigma_px, MIN_STAGE_SIGMA_PX)
@@ -377,9 +411,9 @@ def _solve_once(stage_positions, matches, stage_sigma_px, match_sigma_px, times_
     rows.append(idx), cols.append(idx), vals.append(np.full(n, w_stage))
     if k_count:
         left, frac = _interp_weights(times_s, knots)
-        rows += [idx, idx]
-        cols += [n + left, n + left + 1]
-        vals += [-w_stage * (1.0 - frac), -w_stage * frac]
+        for knot, weight in ((left, 1.0 - frac), (left + 1, frac)):
+            keep = knot > 0
+            rows.append(idx[keep]), cols.append(n + knot[keep] - 1), vals.append(-w_stage * weight[keep])
     rhs.append(w_stage * stage_positions)
     eq = n
     if matches:
@@ -393,31 +427,39 @@ def _solve_once(stage_positions, matches, stage_sigma_px, match_sigma_px, times_
         vals += [w, -w]
         rhs.append(w[:, None] * target)
         eq += len(matches)
-    if k_count:
-        # Drift starts at zero, and its rate between knots has a prior of max_drift_px_per_s.
-        rows.append(np.array([eq])), cols.append(np.array([n])), vals.append(np.array([1e3]))
-        rhs.append(np.zeros((1, 2)))
-        eq += 1
+    if free:
+        # The drift rate between knots has a prior of about max_drift_px_per_s.
         dt = np.diff(knots)
         w_rate = 1.0 / np.maximum(max_drift_px_per_s * dt, 1e-6)
-        e = eq + np.arange(k_count - 1)
-        rows += [e, e]
-        cols += [n + np.arange(1, k_count), n + np.arange(k_count - 1)]
-        vals += [w_rate, -w_rate]
-        rhs.append(np.zeros((k_count - 1, 2)))
-        eq += k_count - 1
-    a = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(eq, n + k_count))
+        e = eq + np.arange(free)
+        rows.append(e), cols.append(n + np.arange(free)), vals.append(w_rate)
+        later = np.arange(1, free)
+        rows.append(eq + later), cols.append(n + later - 1), vals.append(-w_rate[1:])
+        rhs.append(np.zeros((free, 2)))
+        eq += free
+    a = sparse.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(eq, n + free))
     b = np.vstack(rhs)
-    x0 = np.concatenate([stage_positions, np.zeros((k_count, 2))])
+    x0 = np.concatenate([stage_positions, np.zeros((free, 2))])
     # Solve for the correction to the stage placement. The normal equations are sparse (a grid
-    # graph plus the drift knots), and a direct sparse solve is about 10x faster than lsqr here;
-    # beyond DIRECT_SOLVE_MAX unknowns lsqr keeps memory down.
+    # graph plus the drift knots): a direct sparse solve is about 10x faster than lsqr here.
+    # Beyond DIRECT_SOLVE_MAX unknowns lsqr keeps memory down; its convergence is checked.
     if a.shape[1] <= DIRECT_SOLVE_MAX:
         ata = (a.T @ a).tocsc()
         solved = np.stack([x0[:, axis] + spsolve(ata, a.T @ (b[:, axis] - a @ x0[:, axis])) for axis in range(2)], axis=1)
+        if info is not None:
+            info.update({"method": "direct", "converged": bool(np.isfinite(solved).all())})
     else:
-        solved = np.stack([x0[:, axis] + lsqr(a, b[:, axis] - a @ x0[:, axis], atol=1e-10, btol=1e-10, iter_lim=20000)[0] for axis in range(2)], axis=1)
-    return solved[:n], (solved[n:] if k_count else None)
+        scale = 1.0 / np.maximum(np.sqrt(np.asarray(a.multiply(a).sum(axis=0))).ravel(), 1e-12)
+        scaled = a @ sparse.diags(scale)
+        results = [lsqr(scaled, b[:, axis] - a @ x0[:, axis], atol=1e-10, btol=1e-10, iter_lim=LSQR_ITERATIONS) for axis in range(2)]
+        solved = np.stack([x0[:, axis] + scale * r[0] for axis, r in enumerate(results)], axis=1)
+        if info is not None:
+            # istop 1 and 2: solved to the tolerances; 7: the iteration limit was reached first.
+            info.update({"method": "lsqr", "converged": all(r[1] in (1, 2) for r in results), "iterations": int(max(r[2] for r in results)), "istop": [int(r[1]) for r in results]})
+    drift = None
+    if k_count:
+        drift = np.vstack([np.zeros((1, 2)), solved[n:]])
+    return solved[:n], drift
 
 
 def register_tiles(
@@ -442,8 +484,9 @@ def register_tiles(
     times = _times(tiles)
     matches = pairwise_offsets(tiles, stage_px, on_pair=on_pair, stage_sigma_px=sigma_px, max_drift_px_per_s=drift_px_s, min_confidence=min_confidence) if refine else []
     knots, drift = None, None
+    info: dict = {}
     if matches:
-        positions, used, knots, drift = solve_positions(stage_px, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s)
+        positions, used, knots, drift = solve_positions(stage_px, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s, info=info)
         if drift is not None:
             # Match again with each search window centred on the stage position plus the drift found
             # so far. The first pass, centred on the stage alone, misses pairs whose drift difference
@@ -455,7 +498,7 @@ def register_tiles(
             for m in matches:
                 m.offset_px = m.offset_px + (correction[m.j] - correction[m.i])  # relative to the stage again, as the solve expects
             if matches:
-                positions, used, knots, drift = solve_positions(stage_px, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s)
+                positions, used, knots, drift = solve_positions(stage_px, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s, info=info)
     else:
         positions, used = stage_px.copy(), []
     used_ids = {id(m) for m in used}
@@ -469,9 +512,9 @@ def register_tiles(
     positions = positions - shift
     stage_px = stage_px - shift
     origin = (origin[0] + shift[1] * pixel, origin[1] + shift[0] * pixel)
-    shapes = np.array([t.shape for t in tiles])
+    shapes = tile_arrays(tiles)["shapes"]
     canvas = tuple(int(np.ceil(v)) for v in (positions + shapes).max(axis=0))
-    return Placement(positions, stage_px, matches, canvas, origin, pixel, fallback=~matched if refine else None, drift_times_s=knots, drift_px=drift)
+    return Placement(positions, stage_px, matches, canvas, origin, pixel, fallback=~matched if refine else None, drift_times_s=knots, drift_px=drift, solver=info or None)
 
 
 def _cast(array: np.ndarray, dtype) -> np.ndarray:
@@ -550,7 +593,8 @@ def assemble(
     for level, shape in enumerate(shapes):
         writer.create(level, shape, dtype, block)
     tops = np.round(placement.positions_px).astype(np.int64)
-    tile_shapes = np.array([t.shape for t in tiles])
+    tile_shapes = tile_arrays(tiles)["shapes"]
+    gains = np.where(placement.fallback, FALLBACK_WEIGHT, 1.0) if placement.fallback is not None else np.ones(len(tops))
     index: dict[tuple[int, int], list[int]] = {}
     for k, ((top, left), (h, w)) in enumerate(zip(tops, tile_shapes)):
         for bi in range(max(0, top) // block, (top + h - 1) // block + 1):
@@ -585,7 +629,7 @@ def assemble(
                 weight = weight_by_shape[shape] = _blend_weight(shape)
             image = np.asarray(tiles[k].image)
             sub = image[rr0 - top : rr1 - top, cc0 - left : cc1 - left].astype(np.float64)
-            ws = weight[rr0 - top : rr1 - top, cc0 - left : cc1 - left]
+            ws = weight[rr0 - top : rr1 - top, cc0 - left : cc1 - left] * gains[k]
             acc[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += sub * ws
             wsum[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += ws
         out = np.divide(acc, wsum, out=np.zeros_like(acc), where=wsum > 0).astype(np.float32)

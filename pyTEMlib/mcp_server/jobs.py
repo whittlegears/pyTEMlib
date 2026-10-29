@@ -38,10 +38,18 @@ class JobRunner:
         self._jobs: dict[str, dict] = {}
         self._lock = threading.RLock()
         self.tasks: dict[str, tuple[Callable[[dict], dict], Callable[[dict, Callable], dict]]] = {}
+        self.resources: dict[str, Callable[[dict], str]] = {}
 
-    def register(self, name: str, plan_check: Callable[[dict], dict], run: Callable[[dict, Callable], dict]) -> None:
-        """``plan_check(plan) -> estimate`` raises ValueError to refuse; ``run(plan, progress) -> result_keys``."""
+    def register(self, name: str, plan_check: Callable[[dict], dict], run: Callable[[dict, Callable], dict], resource: Callable[[dict], str] | None = None) -> None:
+        """``plan_check(plan) -> estimate`` raises ValueError to refuse; ``run(plan, progress) -> result_keys``.
+
+        ``resource(plan)`` names what the job writes (e.g. a run's map): a second job on the same
+        resource is refused as busy while one is reserved or running, with that job's id, so a
+        client that lost track of its job (a timeout, a restart) adopts it instead of racing it.
+        """
         self.tasks[name] = (plan_check, run)
+        if resource is not None:
+            self.resources[name] = resource
 
     @staticmethod
     def reply(payload: dict) -> dict:
@@ -67,8 +75,17 @@ class JobRunner:
             return self.error("plan_rejected", str(exc))
         reservation_id = uuid.uuid4().hex[:12]
         plan_id = uuid.uuid4().hex[:12]
+        resource = self.resources[task](plan) if task in self.resources else None
         with self._lock:
+            holder = self._holder(resource)
+            if holder is not None:
+                return {
+                    **self.error("busy", f"{resource} is already being worked on by job {holder.get('job_id', holder['reservation_id'])}; wait for it (analysis_job_status) instead of starting another"),
+                    "job_id": holder.get("job_id"),
+                    "reservation_id": holder["reservation_id"],
+                }
             self._jobs[reservation_id] = {
+                "resource": resource,
                 "reservation_id": reservation_id, "plan_id": plan_id, "plan": plan, "caller": caller,
                 "state": "reserved", "done": 0, "total": int(estimate.get("steps", 1)), "result_keys": {}, "summary": {},
                 "last_error": None, "abort": threading.Event(),
@@ -125,6 +142,12 @@ class JobRunner:
         thread.start()
         return self.reply({"job_id": job_id, "reservation_id": reservation_id, "state": "running"})
 
+    def _holder(self, resource: str | None) -> dict | None:
+        """The reserved or running job on ``resource``; call with ``self._lock`` held."""
+        if resource is None:
+            return None
+        return next((j for j in self._jobs.values() if j.get("resource") == resource and j["state"] in {"reserved", "running", "aborting"}), None)
+
     def _status_locked(self, job: dict) -> dict:
         return self.reply(
             {
@@ -157,7 +180,9 @@ class JobRunner:
             elif job["state"] == "reserved":
                 job["state"] = "aborted"
         if thread is not None:
-            thread.join(timeout=30)  # without the lock: the worker needs it to finish
+            # Briefly, so a job between checks reports "aborted" at once; a long step (a large solve)
+            # stays "aborting" until its next check instead of blocking this call.
+            thread.join(timeout=2)
         return self.status(job_id)
 
     def results(self, job_id: str) -> dict:

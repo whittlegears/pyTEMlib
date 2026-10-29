@@ -71,7 +71,7 @@ class Scene:
 class SyntheticRun:
     """A serpentine run of ``side`` x ``side`` tiles whose images are rendered when asked for."""
 
-    def __init__(self, side: int, tile: int, overlap: float, stage_noise: float, drift_px_per_tile: float, seed: int):
+    def __init__(self, side: int, tile: int, overlap: float, stage_noise: float, drift_px_per_tile: float, seed: int, density: float = 8e-4):
         step = tile * (1 - overlap)
         self.tile = tile
         rng = np.random.default_rng(seed + 1)
@@ -88,7 +88,7 @@ class SyntheticRun:
         # What the stage reports: the truth, off by its readout error and by the sample drift since the start.
         self.reported = self.truth + self.drift + rng.normal(0, stage_noise * tile, size=(n, 2))
         extent = side * step + tile + abs(self.drift).max() + 100
-        self.scene = Scene(extent, density=8e-4, seed=seed)
+        self.scene = Scene(extent, density=density, seed=seed)
         self.seed = seed
 
     def __len__(self):
@@ -119,10 +119,18 @@ class LazyTile:
         return self.run.image(self.index)
 
 
-def errors(placed: np.ndarray, truth: np.ndarray) -> dict:
+def mosaic_pairs(placement, run):
+    from pyTEMlib.image_tools.mosaic import overlapping_pairs
+
+    return overlapping_pairs(placement.stage_positions_px, np.full((len(run), 2), run.tile), 16)
+
+
+def errors(placed: np.ndarray, truth: np.ndarray, subset: np.ndarray | None = None) -> dict:
     d = placed - truth
     d = d - np.median(d, axis=0)
     e = np.hypot(d[:, 0], d[:, 1])
+    if subset is not None:
+        e = e[subset]
     return {"median_px": round(float(np.median(e)), 3), "p95_px": round(float(np.percentile(e, 95)), 3), "max_px": round(float(e.max()), 3)}
 
 
@@ -151,11 +159,11 @@ def rss_mb() -> float:
 
 
 def run_size(side: int, args) -> dict:
-    run = SyntheticRun(side, args.tile, args.overlap, args.stage_noise, args.drift, args.seed)
+    run = SyntheticRun(side, args.tile, args.overlap, args.stage_noise, args.drift, args.seed, args.density)
     tiles = [run[k] for k in range(len(run))]
     stage_px = run.reported - run.reported.min(axis=0)
     truth = run.truth
-    row = {"tiles": len(run), "side": side, "tile_px": args.tile, "stage_noise_fov": args.stage_noise, "drift_px_per_tile": args.drift}
+    row = {"tiles": len(run), "side": side, "tile_px": args.tile, "overlap": args.overlap, "density_per_px2": args.density, "stage_noise_fov": args.stage_noise, "drift_px_per_tile": args.drift}
     row["stage_only"] = errors(stage_px, truth)
     if len(run) <= args.naive_max:
         row["naive_append"] = errors(naive_append(run, stage_px), truth)
@@ -165,6 +173,10 @@ def run_size(side: int, args) -> dict:
     row["register_s"] = round(time.time() - t, 1)
     row["register_rss_growth_mb"] = round(rss_mb() - before)
     row["bounded_drift_solve"] = errors(placement.positions_px, truth)
+    if placement.fallback is not None and (~placement.fallback).any():
+        row["bounded_drift_solve"]["matched_tiles_median_px"] = errors(placement.positions_px, truth, ~placement.fallback)["median_px"]
+    row["pairs_overlapping"] = len(mosaic_pairs(placement, run))
+    row["solver"] = placement.solver
     row["matches_used"] = int(sum(m.used for m in placement.matches))
     row["fallback_tiles"] = int(placement.fallback.sum()) if placement.fallback is not None else None
     if placement.drift_px is not None:
@@ -190,9 +202,15 @@ def main():
     parser.add_argument("--naive-max", type=int, default=20000)
     parser.add_argument("--assemble", action="store_true")
     parser.add_argument("--seed", type=int, default=3)
+    parser.add_argument("--density", type=float, default=8e-4, help="particles per pixel^2 of the synthetic sample")
+    parser.add_argument("--out", default=None, help="append each row to this JSON-lines file")
     args = parser.parse_args()
     for side in (int(s) for s in args.sides.split(",")):
-        print(json.dumps(run_size(side, args)), flush=True)
+        row = json.dumps(run_size(side, args))
+        print(row, flush=True)
+        if args.out:
+            with open(args.out, "a", encoding="utf-8") as handle:
+                handle.write(row + "\n")
 
 
 if __name__ == "__main__":
