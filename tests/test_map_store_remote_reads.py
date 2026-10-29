@@ -108,3 +108,14 @@ def test_poi_layer_adds_batches_and_answers_box_queries(tmp_path):
     job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": path, "refine": False})["reservation_id"])
     tools.jobs.wait(job["job_id"])
     assert store.poi_count(key) == 101
+
+
+def test_a_replaced_map_node_is_deleted_with_everything_tiled_wrote():
+    calls = []
+
+    class Node:
+        def delete(self, recursive=False, external_only=True):
+            calls.append((recursive, external_only))
+
+    map_store._delete_node(Node())
+    assert calls == [(True, False)]  # tiled 0.2: delete() acts on the node itself; keep nothing behind

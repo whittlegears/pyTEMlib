@@ -280,6 +280,14 @@ class _TiledMapWriter:
         pass
 
 
+def _delete_node(node) -> None:
+    """Delete a Tiled node and everything under it, data written through Tiled included."""
+    if hasattr(node, "delete_tree"):
+        node.delete_tree()
+    else:  # tiled 0.2: delete() removes this node; external_only=False also removes data Tiled wrote itself
+        node.delete(recursive=True, external_only=False)
+
+
 def _replace_metadata(node, metadata: dict) -> None:
     node.replace_metadata(metadata=metadata) if hasattr(node, "replace_metadata") else node.update_metadata(metadata=metadata)
 
@@ -384,7 +392,7 @@ class MapStore:
             return _LocalMapWriter(self.local_map_path(run))
         name = self.map_name(run)
         if name in self.client:
-            self.client[name].delete_tree() if hasattr(self.client[name], "delete_tree") else self.client.delete(name)
+            _delete_node(self.client[name])
         container = self.client.create_container(name, metadata={"kind": "stitching", "run": run})
         container.create_container("poi", metadata={"kind": "poi_layer"})
         return _TiledMapWriter(container, name)
@@ -506,7 +514,7 @@ class MapStore:
                 if "poi" in node:
                     layer = node["poi"]
                     for key in list(layer):
-                        layer[key].delete_tree() if hasattr(layer[key], "delete_tree") else layer.delete(key)
+                        _delete_node(layer[key])
                 meta = dict(node.metadata)
                 if "pois" in meta:
                     meta.pop("pois")
