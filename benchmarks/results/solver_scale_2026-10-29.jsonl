@@ -1,0 +1,7 @@
+{"tiles": 1024, "match_noise_px": 0.5, "unknowns": 1033, "matches": 2241, "solver": {"method": "direct", "converged": true}, "solve_s": 0.2, "rss_growth_mb": 1, "median_px": 0.785, "p95_px": 1.665, "max_px": 3.695}
+{"tiles": 10000, "match_noise_px": 0.5, "unknowns": 10084, "matches": 22951, "solver": {"method": "direct", "converged": true}, "solve_s": 4.4, "rss_growth_mb": 20, "median_px": 1.559, "p95_px": 2.884, "max_px": 9.833}
+{"tiles": 102400, "match_noise_px": 0.5, "unknowns": 103254, "matches": 234249, "solver": {"method": "direct", "converged": true}, "solve_s": 93.1, "rss_growth_mb": 143, "median_px": 4.826, "p95_px": 9.066, "max_px": 17.963}
+{"tiles": 1024, "match_noise_px": 0.1, "unknowns": 1033, "matches": 2256, "solver": {"method": "direct", "converged": true}, "solve_s": 0.1, "rss_growth_mb": 1, "median_px": 0.361, "p95_px": 0.784, "max_px": 1.8}
+{"tiles": 10000, "match_noise_px": 0.1, "unknowns": 10084, "matches": 23030, "solver": {"method": "direct", "converged": true}, "solve_s": 1.0, "rss_growth_mb": 11, "median_px": 0.659, "p95_px": 1.282, "max_px": 9.185}
+{"tiles": 102400, "match_noise_px": 0.1, "unknowns": 103254, "matches": 235834, "solver": {"method": "direct", "converged": true}, "solve_s": 32.3, "rss_growth_mb": 143, "median_px": 2.261, "p95_px": 4.149, "max_px": 12.853}
+{"tiles": 422500, "timeout_s": 1500.0, "note": "did not finish within the cap; stopped"}

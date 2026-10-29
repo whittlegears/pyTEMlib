@@ -58,7 +58,7 @@ def run_side(side: int, match_noise: float, out: str | None) -> None:
     d -= np.median(d, axis=0)
     e = np.hypot(*d.T)
     row = {
-        "tiles": side * side, "unknowns": side * side + (0 if knots is None else len(knots) - 1), "matches": len(matches),
+        "tiles": side * side, "match_noise_px": match_noise, "unknowns": side * side + (0 if knots is None else len(knots) - 1), "matches": len(matches),
         "solver": info, "solve_s": round(time.time() - t0, 1), "rss_growth_mb": round((process.memory_info().rss - before) / 1e6),
         "median_px": round(float(np.median(e)), 3), "p95_px": round(float(np.percentile(e, 95)), 3), "max_px": round(float(e.max()), 3),
     }

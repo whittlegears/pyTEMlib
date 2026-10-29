@@ -1,0 +1,2 @@
+{"tiles": 10000, "chunk_tiles": 32, "chunks": 313, "cache_mb": 1.0, "run_mb": 78.1, "strip_px": 1000000000, "chunk_reads": 14494, "reads_per_chunk": 46.31, "read_wait_s": 29.0, "register_s": 202.5, "median_px": 0.462}
+{"tiles": 10000, "chunk_tiles": 32, "chunks": 313, "cache_mb": 1.0, "run_mb": 78.1, "strip_px": 1024, "chunk_reads": 1482, "reads_per_chunk": 4.73, "read_wait_s": 3.0, "register_s": 150.3, "median_px": 0.462}

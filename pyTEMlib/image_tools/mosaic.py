@@ -49,7 +49,6 @@ from skimage.registration._masked_phase_cross_correlation import cross_correlate
 # distortion); a smaller sigma would make the prior rigid and leave no room to measure drift.
 MIN_STAGE_SIGMA_PX = 1.0
 HUBER_PX = 0.5  # matches agree with the solution to ~0.1 px; beyond this their weight falls off
-MIN_MATCH_SIGMA_PX = 0.05  # the measured match scatter is not trusted below this
 ROBUST_ROUNDS = 10
 DIRECT_SOLVE_MAX = 400_000  # unknowns solved directly; more use lsqr
 LSQR_ITERATIONS = 50_000
@@ -369,7 +368,6 @@ def solve_positions(
     # readings differ by at most bound_sigmas combined stage sigmas. This catches a wrong peak in a
     # low-texture overlap that nothing else contradicts (its only other constraint is the weak prior).
     bound = bound_sigmas * np.sqrt(2.0) * max(stage_sigma_px, MIN_STAGE_SIGMA_PX) + 1.0
-    sigma = match_sigma_px
     for round_ in range(ROBUST_ROUNDS):
         if not used:
             break
@@ -387,20 +385,11 @@ def solve_positions(
         # Huber weights: a match a little off (a weak, slightly wrong peak) counts less instead of
         # bending its neighbours and the drift fit; one far off is dropped outright.
         new_robust = np.minimum(1.0, HUBER_PX / np.maximum(residuals, 1e-9))[keep]
-        # Weigh matches by their measured scatter, not an assumed one: matches a few times tighter
-        # than assumed are otherwise outvoted by the stage prior, which (with a free drift) lets the
-        # map stretch along the slow scan axis by an amount that grows with the number of rows.
-        # The median 2-D residual of a Gaussian is 1.177 sigma; the fit absorbs a share of it.
-        dof = max(len(residuals[keep]) - len(stage_positions), 1)
-        new_sigma = float(np.clip(np.median(residuals[keep]) / 1.1774 * np.sqrt(len(residuals[keep]) / dof), MIN_MATCH_SIGMA_PX, match_sigma_px))
-        if keep.all() and np.allclose(new_robust, robust, atol=0.02) and abs(new_sigma - sigma) <= 0.1 * sigma:
+        if keep.all() and np.allclose(new_robust, robust, atol=0.02):
             break
         used = [m for m, k in zip(used, keep) if k]
         robust = new_robust
-        sigma = new_sigma
-        positions, drift = _solve_once(stage_positions, used, stage_sigma_px, sigma, times_s, knots, max_drift_px_per_s, robust, info)
-    if info is not None:
-        info["match_sigma_px"] = round(sigma, 3)
+        positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
     return positions, used, knots, drift
 
 

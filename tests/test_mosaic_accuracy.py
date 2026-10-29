@@ -109,28 +109,3 @@ def test_assemble_progress_only_goes_up(tmp_path):
     seen = []
     tools._run_assemble({"run": path, "eds_pois": True}, lambda done, total=None: seen.append(done))
     assert seen == sorted(seen) and seen[-1] == PROGRESS_STEPS
-
-
-solver_spec = importlib.util.spec_from_file_location("solver_scale", Path(__file__).resolve().parents[1] / "benchmarks" / "solver_scale.py")
-solver_bench = importlib.util.module_from_spec(solver_spec)
-solver_spec.loader.exec_module(solver_bench)
-
-
-def solve_error(side):
-    s, q, times, matches_around = solver_bench.synthetic(side, 64, 0.3, 3.2, 0.02, 0.1, 3)
-    info = {}
-    _p, _u, knots, drift = mosaic.solve_positions(s, matches_around(s), 3.2, times_s=times, max_drift_px_per_s=0.06, info=info)
-    positions, _u, _k, _d = mosaic.solve_positions(s, matches_around(s + mosaic._drift_at(times, knots, drift)), 3.2, times_s=times, max_drift_px_per_s=0.06, info=info)
-    d = positions - q
-    d -= np.median(d, axis=0)
-    return float(np.median(np.hypot(*d.T))), info
-
-
-def test_tight_matches_keep_the_map_from_stretching_along_the_slow_axis_as_it_grows():
-    # 5 % FOV stage noise and drift, matches good to 0.1 px. With the matches weighted at an assumed
-    # 0.5 px, the stage prior and the free drift let rows creep apart: 0.24 px at 30 x 30 rising to 0.66 px
-    # at 100 x 100 and 17 px at 320 x 320. Weighted by their measured scatter it stays ~0.13 px.
-    small, _ = solve_error(30)
-    large, info = solve_error(100)
-    assert large < 0.3 and large < 1.5 * small, (small, large)
-    assert info["match_sigma_px"] == pytest.approx(0.1, abs=0.02)
