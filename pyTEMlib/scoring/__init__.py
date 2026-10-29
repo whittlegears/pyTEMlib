@@ -10,6 +10,12 @@ Register a scorer from any installed package with an entry point:
 
     [project.entry-points."pytemlib.scorers"]
     grain_boundaries = "my_package.scorers:GrainBoundaryScorer"
+
+Evaluate any scorer by name with ``python -m pyTEMlib.scoring.bench --scorer <name>``
+(``pyTEMlib.scoring.evaluate``): precision@5 against synthetic maps with known
+particles and deliberately defocused or contaminated regions. That is a
+detection proxy, not a check against what a microscopist would choose; see
+``README.md`` in this folder.
 """
 
 from __future__ import annotations
