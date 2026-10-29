@@ -337,10 +337,10 @@ def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path
     with pytest.raises(SystemExit):
         cli.main(["--tiled", "http://localhost:9091", "--api-key", "secret", "--port", "8003"])
     assert seen["args"] == ("http://localhost:9091", "secret")
-    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000_000}
+    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000_000, "trace_path": "outputs/trace/analysis.jsonl"}
     with pytest.raises(SystemExit):
         cli.main(["--local-root", str(tmp_path), "--local-root", "data", "--max-canvas-megapixels", "50"])
-    assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000}
+    assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000, "trace_path": "outputs/trace/analysis.jsonl"}
 
 
 def test_status_can_wait_for_the_job(client, run_file):
@@ -382,3 +382,18 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
     assert call(c, "list_pois", map=map_key, kind="eds_point, note, revisit")["total"] == 5
     missing = call(c, "list_pois", map=map_key, kind="poi")
     assert missing["total"] == 0 and missing["kinds_on_map"] == ["eds_point", "note"]
+
+
+def test_every_tool_call_is_traced_with_its_arguments_and_outcome(tmp_path, run_file):
+    trace = tmp_path / "analysis.jsonl"
+    c, tools, loop = open_client(local_roots=[tmp_path], trace_path=str(trace))
+    try:
+        call(c, "list_pois", map="no_such_map", kind="candidate")
+    except Exception:
+        pass
+    call(c, "list_scorers")
+    lines = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert [r["tool"] for r in lines] == ["list_pois", "list_scorers"]
+    assert '"kind": "candidate"' in lines[0]["arguments"] and lines[0]["ok"] is False and lines[0]["error"]
+    assert lines[1]["ok"] is True and lines[1]["source"] == "analysis" and "caller" in lines[1] and "run" in lines[1]
+    loop.run_until_complete(c.__aexit__(None, None, None))

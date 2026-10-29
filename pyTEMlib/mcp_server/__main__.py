@@ -23,8 +23,15 @@ def main(argv: list[str] | None = None) -> None:
         "--max-canvas-megapixels", type=float, default=DEFAULT_MAX_CANVAS_PIXELS / 1e6,
         help="Largest full-resolution map assemble_map will stitch; the whole map is held in memory (default: %(default)g).",
     )
+    parser.add_argument(
+        "--trace", default="outputs/trace/analysis.jsonl",
+        help="JSON-lines file with one line per tool call: tool, arguments, calling agent and run, outcome (empty: none).",
+    )
     args = parser.parse_args(argv)
-    mcp, tools = create_server(args.tiled or None, args.api_key, local_roots=args.local_root, max_canvas_pixels=int(args.max_canvas_megapixels * 1e6))
+    mcp, tools = create_server(
+        args.tiled or None, args.api_key, local_roots=args.local_root,
+        max_canvas_pixels=int(args.max_canvas_megapixels * 1e6), trace_path=args.trace or None,
+    )
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     else:

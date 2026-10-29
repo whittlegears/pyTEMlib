@@ -41,18 +41,24 @@ def create_server(
     include_basic: bool = True,
     local_roots: list | None = None,
     max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS,
+    trace_path: str | None = None,
 ) -> tuple[FastMCP, MapTools]:
     """Build a new MCP server; returns (FastMCP app, MapTools) so callers can also use the tools directly.
 
     ``local_roots``: directories whose HDF5 files may be used as local runs and
     maps (default: the current working directory). ``max_canvas_pixels``:
-    largest level-0 map ``assemble_map`` will stitch (it is held in memory).
+    largest level-0 map ``assemble_map`` will stitch (it is held in memory). ``trace_path``: a JSON-lines
+    file that gets one line per tool call (tool, arguments, the calling agent and run, outcome).
 
     Every call returns a fresh FastMCP instance, so calling it twice never
     registers a tool twice. The basic tools are mounted from
     ``basic_tools.mcp``, which is left unchanged.
     """
     mcp = FastMCP(name)
+    if trace_path:
+        from .trace import ToolTrace
+
+        mcp.add_middleware(ToolTrace(trace_path))
     if include_basic:
         from . import basic_tools
 
