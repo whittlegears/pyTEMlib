@@ -633,6 +633,14 @@ class MapStore:
             out = [p for p in out if x0 <= p["x_m"] <= x1 and y0 <= p["y_m"] <= y1]
         return out if limit is None else out[:limit]
 
+    def poi_kinds(self, map_key: str) -> list[str]:
+        """The kinds of point the map holds, from its highlights and stored cell counts (no cell is read)."""
+        meta = self.map_metadata(map_key)
+        found = {str(p.get("kind")) for p in (_decode(meta.get("pois", [])) or []) + self._read_group(map_key, meta, HIGHLIGHTS)}
+        if any(n > 0 for n in self.poi_counts(map_key)["cells"].values()):
+            found |= CELL_KINDS
+        return sorted(found)
+
     def poi_counts(self, map_key: str) -> dict:
         """Points per cell and in total, from stored counts (no point is read): {"total", "highlights", "cells": {"i_j": n}, "grid"}."""
         meta = self.map_metadata(map_key)

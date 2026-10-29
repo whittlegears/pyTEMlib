@@ -116,9 +116,6 @@ def stitch_quality(placement) -> dict:
     return out
 
 
-KIND_SAMPLE = 1000  # points read to name a map's kinds when a kind filter matches nothing
-
-
 class MapTools:
     def __init__(self, store: MapStore, max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS):
         self.store = store
@@ -283,15 +280,15 @@ class MapTools:
         limit = max(0, int(limit))
         # Models ask for kind="all" or list several kinds in one string; a filter that matches nothing reads as "no points".
         kinds = {k for k in re.split(r"[\s,;|]+", kind or "") if k} - {"all", "any", "*"}
-        kind = next(iter(kinds)) if len(kinds) == 1 else None
         if box_m is None and not kinds:
             return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
-        pois = self.store.list_pois(map_key, kind=kind, box_m=box_m)
-        if len(kinds) > 1:
-            pois = [p for p in pois if p.get("kind") in kinds]
+        if not kinds:
+            pois = self.store.list_pois(map_key, box_m=box_m)
+        else:  # one read per kind, so a highlight kind never reads the map's spatial cells
+            pois = [p for k in sorted(kinds) for p in self.store.list_pois(map_key, kind=k, box_m=box_m)]
         out = {"total": len(pois), "pois": pois[:limit]}
-        if not pois and kinds:
-            out["kinds_on_map"] = sorted({str(p.get("kind")) for p in self.store.list_pois(map_key, limit=KIND_SAMPLE)})
+        if not pois and kinds and box_m is None:
+            out["kinds_on_map"] = self.store.poi_kinds(map_key)
         return out
 
     # -------------------------------------------------------------- tools
