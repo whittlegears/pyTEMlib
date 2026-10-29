@@ -21,6 +21,10 @@ ENVELOPE_SCHEMA_PATH = Path(__file__).with_name("schemas") / "envelope.schema.js
 ENVELOPE_VERSION = json.loads(ENVELOPE_SCHEMA_PATH.read_text(encoding="utf-8"))["schema_version"]
 
 
+RESERVATION_TTL_S = 900.0  # a reservation nobody started within this is released, so it cannot hold a run or map forever
+KEEP_FINISHED_S = 6 * 3600.0  # finished jobs stay readable this long, then are forgotten (a long-lived server keeps no history)
+
+
 class Aborted(Exception):
     pass
 
@@ -77,6 +81,7 @@ class JobRunner:
         plan_id = uuid.uuid4().hex[:12]
         resource = self.resources[task](plan) if task in self.resources else None
         with self._lock:
+            self._tidy_locked(time.time())
             holder = self._holder(resource)
             if holder is not None:
                 return {
@@ -88,7 +93,7 @@ class JobRunner:
                 "resource": resource,
                 "reservation_id": reservation_id, "plan_id": plan_id, "plan": plan, "caller": caller,
                 "state": "reserved", "done": 0, "total": int(estimate.get("steps", 1)), "result_keys": {}, "summary": {},
-                "last_error": None, "abort": threading.Event(),
+                "last_error": None, "abort": threading.Event(), "created": time.time(),
             }
         return self.reply({"reservation_id": reservation_id, "plan_id": plan_id, "resolved_plan": plan, "estimate": estimate})
 
@@ -141,6 +146,14 @@ class JobRunner:
             job["thread"] = thread
         thread.start()
         return self.reply({"job_id": job_id, "reservation_id": reservation_id, "state": "running"})
+
+    def _tidy_locked(self, now: float) -> None:
+        """Release reservations left unstarted past RESERVATION_TTL_S and forget jobs that ended KEEP_FINISHED_S ago."""
+        for key, job in list(self._jobs.items()):
+            if job["state"] == "reserved" and now - job.get("created", now) > RESERVATION_TTL_S:
+                job.update(state="released", finished=now, last_error={"code": "expired", "message": f"not started within {RESERVATION_TTL_S:g} s"})
+            elif job["state"] in {"done", "failed", "aborted", "released"} and now - job.get("finished", now) > KEEP_FINISHED_S:
+                del self._jobs[key]
 
     def _holder(self, resource: str | None) -> dict | None:
         """The reserved or running job on ``resource``; call with ``self._lock`` held."""
@@ -207,6 +220,7 @@ class JobRunner:
             if job["state"] in {"running", "aborting"}:
                 return self.error("bad_state", f"job is {job['state']}; abort it first")
             job["state"] = "released"
+            job["finished"] = time.time()
         return self.reply({"reservation_id": reservation_id, "state": "released"})
 
     def wait(self, job_id: str, timeout: float = 600.0) -> dict:
