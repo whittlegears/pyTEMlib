@@ -191,7 +191,7 @@ class JobRunner:
                 job["abort"].set()
                 thread = job.get("thread")
             elif job["state"] == "reserved":
-                job["state"] = "aborted"
+                job.update(state="aborted", finished=time.time())
         if thread is not None:
             # Briefly, so a job between checks reports "aborted" at once; a long step (a large solve)
             # stays "aborting" until its next check instead of blocking this call.
