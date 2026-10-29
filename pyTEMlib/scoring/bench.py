@@ -3,13 +3,16 @@ Command-line bench for field-of-view scorers.
 
     python -m pyTEMlib.scoring.bench --scorer baseline
     python -m pyTEMlib.scoring.bench --scorer random
+    python -m pyTEMlib.scoring.bench --scorer baseline_v2
     python -m pyTEMlib.scoring.bench --scorer my_package.scorers:MyScorer --seeds 0 1 2 --out results.jsonl
 
 ``--scorer`` takes a registered name (see ``pyTEMlib.scoring.available_scorers``;
 the reference ``random`` is always there) or ``module:attribute`` naming a
 scorer class or instance, so a new scorer can be benched before it is
 packaged. Prints the result as JSON; ``--out`` also appends it as one line to
-a JSONL file. Exits 1 when precision@k falls below the threshold on any seed.
+a JSONL file. The default seeds are the held-out ones (3-29); seeds 0-2 are
+for tuning. Exits 1 when precision@k falls below the threshold on any seed or,
+averaged over the seeds, for any feature kind.
 
 The number is a detection proxy (sharp, clean particles found), not a
 measure of what a microscopist would choose.

@@ -12,8 +12,10 @@ Register a scorer from any installed package with an entry point:
     grain_boundaries = "my_package.scorers:GrainBoundaryScorer"
 
 Evaluate any scorer by name with ``python -m pyTEMlib.scoring.bench --scorer <name>``
-(``pyTEMlib.scoring.evaluate``): precision@5 against synthetic maps with known
-particles and deliberately defocused or contaminated regions. That is a
+(``pyTEMlib.scoring.evaluate``): precision@5, overall and per feature kind,
+against synthetic maps with known particles (separated, crowded, small, large,
+other pixel sizes, low contrast) and deliberately defocused, contaminated or
+empty regions. That is a
 detection proxy, not a check against what a microscopist would choose; see
 ``README.md`` in this folder.
 """
@@ -25,7 +27,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from .baseline import BaselineScorer
+from .baseline import BaselineScorer, BaselineScorerV2
 
 ENTRY_POINT_GROUP = "pytemlib.scorers"
 
@@ -42,7 +44,7 @@ class Scorer(Protocol):
 
 def available_scorers() -> dict[str, Scorer]:
     """Built-in scorers plus any registered under the ``pytemlib.scorers`` entry point."""
-    scorers: dict[str, Scorer] = {BaselineScorer.name: BaselineScorer()}
+    scorers: dict[str, Scorer] = {BaselineScorer.name: BaselineScorer(), BaselineScorerV2.name: BaselineScorerV2()}
     for entry in entry_points(group=ENTRY_POINT_GROUP):
         try:
             loaded = entry.load()
@@ -69,4 +71,4 @@ def score_windows(image: np.ndarray, scorer: Scorer, window: int, stride: int | 
     return out
 
 
-__all__ = ["BaselineScorer", "Scorer", "available_scorers", "score_windows"]
+__all__ = ["BaselineScorer", "BaselineScorerV2", "Scorer", "available_scorers", "score_windows"]
