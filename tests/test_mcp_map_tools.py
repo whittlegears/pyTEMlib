@@ -378,3 +378,6 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
         assert len(reply["pois"]) == min(reply["total"], args.get("limit", 200))
     assert call(c, "list_pois", map=map_key)["total"] == 5
     assert call(c, "list_pois", map=map_key, kind="eds_point", limit=1)["total"] == 3
+    assert call(c, "list_pois", map=map_key, kind="all")["total"] == 5  # what small models ask for
+    missing = call(c, "list_pois", map=map_key, kind="poi")
+    assert missing["total"] == 0 and missing["kinds_on_map"] == ["eds_point", "note"]

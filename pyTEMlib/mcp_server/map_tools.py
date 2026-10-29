@@ -115,6 +115,9 @@ def stitch_quality(placement) -> dict:
     return out
 
 
+KIND_SAMPLE = 1000  # points read to name a map's kinds when a kind filter matches nothing
+
+
 class MapTools:
     def __init__(self, store: MapStore, max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS):
         self.store = store
@@ -274,12 +277,18 @@ class MapTools:
         }
 
     def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
-        """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter."""
+        """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
+        except that a kind matching nothing also names the kinds the map has (``kinds_on_map``)."""
         limit = max(0, int(limit))
+        if kind is not None and kind.strip().lower() in ("", "all", "any", "*"):
+            kind = None  # models ask for kind="all"; a filter that matches nothing would read as "no points"
         if box_m is None and kind is None:
             return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
         pois = self.store.list_pois(map_key, kind=kind, box_m=box_m)
-        return {"total": len(pois), "pois": pois[:limit]}
+        out = {"total": len(pois), "pois": pois[:limit]}
+        if not pois and kind is not None:
+            out["kinds_on_map"] = sorted({str(p.get("kind")) for p in self.store.list_pois(map_key, limit=KIND_SAMPLE)})
+        return out
 
     # -------------------------------------------------------------- tools
     def register(self, mcp: FastMCP) -> None:
@@ -396,6 +405,7 @@ class MapTools:
         def list_pois(map: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
+            kind: only one kind, e.g. eds_point, candidate, revisit, note; leave it out for every kind.
             box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read).
             Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape.
             """
