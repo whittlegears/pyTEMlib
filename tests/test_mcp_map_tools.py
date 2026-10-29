@@ -112,7 +112,8 @@ def test_stitch_view_score_and_annotate(client, run_file):
     outside = call(c, "add_poi", map=map_key, x_m=x1 + 1e-6, y_m=y0)
     assert outside["error"]["code"] == "outside_map"
     pois = call(c, "list_pois", map=map_key)
-    pois = pois["result"] if isinstance(pois, dict) else pois
+    assert pois["total"] == 4
+    pois = pois["pois"]
     assert len(pois) == 4
     assert [p["kind"] for p in pois].count("eds_point") == 1
 
@@ -156,12 +157,12 @@ def test_level_shapes_stored_and_pixel_stage_round_trip_above_level_0(client, ru
     map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
     meta = tools.store.map_metadata(map_key)
     assert meta["levels"] >= 3
-    legacy = {k: v for k, v in meta.items() if k != "level_shapes"}  # a map written before level_shapes existed
     for level in range(meta["levels"]):
         actual = tools.store.level_shape(map_key, level)
         assert tuple(meta["level_shapes"][level]) == actual
         assert level_shape_of(meta, level) == actual
-        assert level_shape_of(legacy, level) == actual
+    # A map written before level_shapes was stored: its writer rounded rows up at each halving.
+    assert level_shape_of({"canvas_shape": [5, 7]}, 1) == (3, 3)
 
     pixel0 = meta["pixel_size_m"]
     for level in range(1, meta["levels"]):
@@ -196,7 +197,7 @@ def test_concurrent_add_poi_keeps_every_point(client, run_file):
         t.start()
     for t in threads:
         t.join()
-    ids = sorted(p["id"] for p in tools.store.map_metadata(map_key)["pois"])
+    ids = sorted(p["id"] for p in tools.store.list_pois(map_key))
     assert ids == sorted(f"p{k}" for k in range(16))
 
 
@@ -250,7 +251,7 @@ def test_restitching_keeps_points_of_interest(client, run_file):
     assert again == map_key
     meta = tools.store.map_metadata(map_key)
     assert meta["refined"] is False  # the map really was rewritten
-    assert meta["pois"] == [poi]
+    assert tools.store.list_pois(map_key) == [poi]
 
 
 def test_local_paths_outside_the_roots_are_refused(client_factory, tmp_path):
@@ -280,7 +281,7 @@ def test_abort_during_registration_stops_promptly(client, run_file, monkeypatch)
 
     from pyTEMlib.image_tools import mosaic
 
-    real = mosaic.phase_cross_correlation
+    real = mosaic.bounded_shift
     calls = []
     started = threading.Event()
 
@@ -290,13 +291,13 @@ def test_abort_during_registration_stops_promptly(client, run_file, monkeypatch)
         time.sleep(0.2)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(mosaic, "phase_cross_correlation", slow)
+    monkeypatch.setattr(mosaic, "bounded_shift", slow)
     c, tools = client
     job_id = call(c, "assemble_map", run=run_file)["job_id"]
     assert started.wait(30)
     status = call(c, "analysis_job_status", job_id=job_id)
     assert status["state"] == "running"
-    pairs = status["progress"]["total"] - 2
+    pairs = (status["progress"]["total"] - 1) // 2  # pairs matched, then as many steps of pyramid blocks, then the write
     assert pairs >= 12  # 3 x 3 grid: 12 edge pairs, plus diagonals if they overlap enough
 
     t0 = time.monotonic()
@@ -335,7 +336,7 @@ def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path
     with pytest.raises(SystemExit):
         cli.main(["--tiled", "http://localhost:9091", "--api-key", "secret", "--port", "8003"])
     assert seen["args"] == ("http://localhost:9091", "secret")
-    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000}
+    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000_000}
     with pytest.raises(SystemExit):
         cli.main(["--local-root", str(tmp_path), "--local-root", "data", "--max-canvas-megapixels", "50"])
     assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000}

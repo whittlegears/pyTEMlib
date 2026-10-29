@@ -14,10 +14,10 @@ Run it with::
     python -m pyTEMlib.mcp_server --tiled http://localhost:9091 --port 8003
 
 Local HDF5 paths are accepted only under ``--local-root`` directories
-(repeatable; default the working directory). ``assemble_map`` holds the
-whole stitched map in memory, so it refuses maps over
-``--max-canvas-megapixels`` (default 400) at full resolution; see
-``map_tools`` for the details.
+(repeatable; default the working directory). ``assemble_map`` reads tiles
+lazily and writes the pyramid block by block, so its memory does not grow
+with the map; ``--max-canvas-megapixels`` (default 400000) only catches a
+run with wrong metadata. See ``map_tools`` for the details.
 
 ``create_server`` builds the same server in-process; ``from pyTEMlib.mcp_server import mcp``
 gives a default instance (local files, no Tiled URI) built on first use.

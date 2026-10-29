@@ -98,18 +98,31 @@ def test_stitched_map_matches_scene_and_pyramid_halves():
     assert np.corrcoef(overlap[covered], reference[covered])[0, 1] > 0.98
 
 
-def test_assembly_memory_is_bounded_by_band_size():
+class CountingWriter:
+    def __init__(self):
+        self.shapes, self.written = [], []
+
+    def create(self, level, shape, dtype, block):
+        self.shapes.append(shape)
+        self.written.append(np.zeros(shape, bool))
+
+    def write(self, level, row0, col0, data):
+        assert not self.written[level][row0 : row0 + data.shape[0], col0 : col0 + data.shape[1]].any()  # each pixel once
+        self.written[level][row0 : row0 + data.shape[0], col0 : col0 + data.shape[1]] = True
+
+
+def test_assembly_memory_is_bounded_by_block_size_and_writes_every_pixel_once():
     rng = np.random.default_rng(5)
     tiles = [Tile(rng.integers(0, 1000, (512, 512), dtype=np.uint16), ((c * 480 + 256) * PIXEL, (r * 480 + 256) * PIXEL), PIXEL, r * 8 + c) for r in range(8) for c in range(8)]
     placement = register_tiles(tiles, refine=False)
     canvas_bytes = placement.canvas_shape[0] * placement.canvas_shape[1] * 2
-    written = []
+    writer = CountingWriter()
     tracemalloc.start()
-    assemble(tiles, placement, lambda level, row0, band: written.append(band.nbytes), band_rows=256)
+    assemble(tiles, placement, writer, block=256)
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    assert sum(written) >= canvas_bytes
-    assert peak < 0.5 * canvas_bytes * 4  # float64 working copy of the full canvas would be 4x canvas_bytes
+    assert all(level.all() for level in writer.written)
+    assert peak < 0.25 * canvas_bytes * 4  # a float64 working copy of the canvas would be 4x canvas_bytes
 
 
 def test_mixed_pixel_sizes_rejected():
