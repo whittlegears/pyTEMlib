@@ -68,6 +68,9 @@ def create_server(
         mcp.mount(basic_tools.mcp)
     tools = MapTools(MapStore(tiled_uri, api_key, local_roots=local_roots), max_canvas_pixels=max_canvas_pixels)
     tools.register(mcp)
+    from .frames import register as register_frames
+
+    register_frames(mcp, tools.store)
     if annotations_path:
         from .annotation_store import AnnotationStore, register as register_notes
 

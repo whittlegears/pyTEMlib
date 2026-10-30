@@ -1,0 +1,128 @@
+"""Pixel <-> stage coordinates for a stitched map or a single image, so an agent never does the arithmetic.
+
+A stitched map carries its own transform (origin and pixel size). A single image is placed from what its
+acquisition recorded: the stage position (reported, else commanded) is the image centre, rows run along +y
+and columns along +x (the ``axes`` the twin and instruments record), one pixel is ``pixel_size_m``. An image
+taken at a non-zero tilt, or over part of the scan field, is refused: the flat transform would be wrong.
+Image (beam) shift is not recorded with an image, so it is not included; the reply says so.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from typing import Any
+
+from .map_store import pixel_to_stage
+
+MAX_TILT_DEG = 0.05
+AXES = "rows=+y, columns=+x"
+
+
+class FrameError(ValueError):
+    pass
+
+
+def _vector(value) -> list[float] | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if isinstance(value, (list, tuple)) and all(isinstance(v, (int, float)) for v in value):
+        return [float(v) for v in value]
+    return None
+
+
+def image_node(store, key: str):
+    """The 2-D array of an acquisition: the key itself, or the first array under its ``image`` group."""
+    node = store.client[key]
+    if getattr(node, "structure_family", None) == "container":
+        group = node["image"] if "image" in node else node
+        arrays = [group[name] for name in group if getattr(group[name], "structure_family", None) == "array"]
+        if not arrays:
+            raise FrameError(f"{key} holds no image array")
+        node = arrays[0]
+    return node
+
+
+def frame_of(store, key: str) -> dict[str, Any]:
+    """How ``key``'s pixels sit on the stage: {"kind", "origin_xy_m" or "centre_xy_m", "pixel_size_m", "shape"}."""
+    try:
+        meta = store.map_metadata(key)
+    except (KeyError, ValueError, FileNotFoundError):
+        meta = None
+    if meta and meta.get("kind") == "stitched_map":
+        return {"kind": "map", "metadata": meta, "pixel_size_m": float(meta["pixel_size_m"]), "shape": list(meta["canvas_shape"])}
+    node = image_node(store, key)
+    m = dict(node.metadata)
+    stage = _vector(m.get("stage_reported_m")) or _vector(m.get("stage_commanded_m"))
+    pixel = m.get("pixel_size_m")
+    if not stage or len(stage) < 2 or not isinstance(pixel, (int, float)) or not pixel > 0:
+        raise FrameError(f"{key} does not record where it was taken (stage_reported_m and pixel_size_m)")
+    if m.get("axes", AXES) != AXES:
+        raise FrameError(f"{key} records axes {m.get('axes')!r}; only {AXES!r} is understood")
+    region = _vector(m.get("scan_region"))
+    if region is not None and region != [0.0, 0.0, 1.0, 1.0]:
+        raise FrameError(f"{key} covers part of the scan field ({region}); its pixels cannot be placed on the stage yet")
+    tilts = stage[3:5]
+    if any(abs(t) > MAX_TILT_DEG for t in tilts):
+        raise FrameError(f"{key} was taken at tilt {tilts} degrees; the flat pixel-to-stage transform would be wrong there")
+    shape = list(node.structure().shape)[-2:]
+    return {"kind": "image", "centre_xy_m": stage[:2], "pixel_size_m": float(pixel), "shape": shape}
+
+
+def stage_of(frame: dict, row: float, col: float) -> tuple[float, float]:
+    if frame["kind"] == "map":
+        return pixel_to_stage(frame["metadata"], row, col)
+    rows, cols = frame["shape"]
+    p = frame["pixel_size_m"]
+    cx, cy = frame["centre_xy_m"]
+    return cx + (col - (cols - 1) / 2.0) * p, cy + (row - (rows - 1) / 2.0) * p
+
+
+def pixel_of(frame: dict, x: float, y: float) -> tuple[float, float]:
+    p = frame["pixel_size_m"]
+    if frame["kind"] == "map":
+        ox, oy = frame["metadata"]["origin_xy_m"]
+        return (y - oy) / p, (x - ox) / p
+    rows, cols = frame["shape"]
+    cx, cy = frame["centre_xy_m"]
+    return (y - cy) / p + (rows - 1) / 2.0, (x - cx) / p + (cols - 1) / 2.0
+
+
+def register(mcp, store) -> None:
+    def finite(*values) -> bool:
+        return all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+
+    @mcp.tool()
+    def to_stage(dataset: str, row: float, col: float) -> dict[str, Any]:
+        """Stage x, y (metres) of pixel (row, col) of a stitched map or a single image. Use it instead of doing the
+        arithmetic yourself, e.g. before moving the stage to a feature you found in an image."""
+        if not finite(row, col):
+            return {"error": {"code": "bad_pixel", "message": "row and col must be finite numbers"}}
+        try:
+            frame = frame_of(store, dataset)
+        except KeyError:
+            return {"error": {"code": "unknown_dataset", "message": f"no map or image {dataset!r}"}}
+        except FrameError as exc:
+            return {"error": {"code": "no_frame", "message": str(exc)}}
+        x, y = stage_of(frame, row, col)
+        rows, cols = frame["shape"]
+        return {"x_m": x, "y_m": y, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"],
+                **({"note": "image shift is not recorded with an image, so it is not included"} if frame["kind"] == "image" else {})}
+
+    @mcp.tool()
+    def to_pixel(dataset: str, x_m: float, y_m: float) -> dict[str, Any]:
+        """Pixel (row, col) of stage position (x_m, y_m) on a stitched map or a single image, and whether it is inside."""
+        if not finite(x_m, y_m):
+            return {"error": {"code": "bad_position", "message": "x_m and y_m must be finite numbers"}}
+        try:
+            frame = frame_of(store, dataset)
+        except KeyError:
+            return {"error": {"code": "unknown_dataset", "message": f"no map or image {dataset!r}"}}
+        except FrameError as exc:
+            return {"error": {"code": "no_frame", "message": str(exc)}}
+        row, col = pixel_of(frame, x_m, y_m)
+        rows, cols = frame["shape"]
+        return {"row": row, "col": col, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"]}
