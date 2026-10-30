@@ -58,6 +58,7 @@ def test_an_image_centre_is_where_the_stage_was_and_pixels_step_along_x_and_y():
     ({"stage_reported_m": "[0, 0, 0, 10.0, 0]", "stage_commanded_m": None}, "tilt"),
     ({"scan_region": "[0.25, 0.25, 0.75, 0.75]"}, "part of the scan field"),
     ({"axes": "rows=-y, columns=+x"}, "axes"),
+    ({"axes": None}, "axes"),
     ({"pixel_size_m": None}, "does not record"),
     ({"stage_reported_m": "[NaN, 0, 0, 0, 0]", "stage_commanded_m": None}, "not a number"),
     ({"stage_reported_m": "[0, 0, 0, NaN, 0]", "stage_commanded_m": None}, "not a number"),

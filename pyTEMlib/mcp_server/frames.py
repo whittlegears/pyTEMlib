@@ -61,7 +61,7 @@ def frame_of(store, key: str) -> dict[str, Any]:
     pixel = m.get("pixel_size_m")
     if not stage or len(stage) < 2 or not isinstance(pixel, (int, float)) or not pixel > 0:
         raise FrameError(f"{key} does not record where it was taken (stage_reported_m and pixel_size_m)")
-    if m.get("axes", AXES) != AXES:
+    if m.get("axes") != AXES:  # an image that does not say which way its rows run cannot be placed
         raise FrameError(f"{key} records axes {m.get('axes')!r}; only {AXES!r} is understood")
     region = _vector(m.get("scan_region"))
     if region is not None and region != [0.0, 0.0, 1.0, 1.0]:
