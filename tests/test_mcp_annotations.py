@@ -8,7 +8,7 @@ import h5py
 import pytest
 
 from pyTEMlib.mcp_server import create_server
-from pyTEMlib.mcp_server.annotations import AnnotationError, AnnotationStore
+from pyTEMlib.mcp_server.annotation_store import AnnotationError, AnnotationStore
 
 
 @pytest.fixture
@@ -191,3 +191,17 @@ def test_one_local_file_has_one_set_of_notes_whatever_the_path_spelling(tmp_path
     _call(mcp, "annotate", {"dataset": "./image.h5", "shape": "pin", "coords": {"x": 1, "y": 2}, "frame": "pixel"})
     assert _call(mcp, "list_annotations", {"dataset": str(data)})["total"] == 1
     assert _call(mcp, "list_annotations", {"dataset": "image.h5"})["total"] == 1
+
+
+def test_the_command_line_server_builds_with_notes_in_a_fresh_process(tmp_path):
+    import subprocess
+    import sys
+
+    code = (
+        "from pyTEMlib.mcp_server import create_server; import asyncio; "
+        f"mcp, _ = create_server(local_roots=[], include_basic=False, annotations_path={str(tmp_path / 'n.jsonl')!r}); "
+        "print(sorted(t.name for t in asyncio.run(mcp.list_tools()) if 'annotation' in t.name or t.name == 'annotate'))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert "annotate" in out.stdout and "list_annotations" in out.stdout

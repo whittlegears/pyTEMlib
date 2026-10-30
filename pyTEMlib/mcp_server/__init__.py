@@ -69,9 +69,9 @@ def create_server(
     tools = MapTools(MapStore(tiled_uri, api_key, local_roots=local_roots), max_canvas_pixels=max_canvas_pixels)
     tools.register(mcp)
     if annotations_path:
-        from . import annotations
+        from .annotation_store import AnnotationStore, register as register_notes
 
-        annotations.register(mcp, annotations.AnnotationStore(annotations_path), tools.store.dataset_key)
+        register_notes(mcp, AnnotationStore(annotations_path), tools.store.dataset_key)
     return mcp, tools
 
 
