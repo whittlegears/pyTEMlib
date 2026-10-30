@@ -472,10 +472,54 @@ def solve_positions(
         cutoff = cutoff_of(check(used, positions, drift)[0])
         back = [m for m, r, d in zip(candidates, residuals, disagreement) if r <= cutoff and d <= bound]
         back += _consensus_links(candidates, back, positions, stage_positions, len(stage_positions), outlier_px)
+        back = _tile_vote(candidates, back, positions, stage_positions, outlier_px)
         if {id(m) for m in back} == {id(m) for m in used}:
             break
         positions, used, drift = robust_solve(back, trust_drift=True)
     return positions, used, knots, drift
+
+
+def _tile_vote(candidates, used, positions, stage_positions, radius_px: float) -> list[PairMatch]:
+    """Per tile, let a better-supported set of agreeing links replace the links it uses.
+
+    Each link of a tile says where the tile is, given where the other tile now is. The links that agree within
+    ``radius_px`` form sets; a set beats another by having more links, then more confidence. When the best set is
+    not the set the tile already uses and beats it, the tile switches: a right link no longer loses to a wrong one
+    just because the solve leaned the wrong way. When a tile has two or more links, no two agree and none reaches
+    LINK_CONFIDENCE, its evidence contradicts itself and it keeps none (listed as unplaced, not placed by a guess).
+    """
+    taken_ids = {id(m) for m in used}
+    by_tile: dict[int, list[tuple[PairMatch, np.ndarray]]] = {}
+    for m in candidates:
+        measured = stage_positions[m.j] - stage_positions[m.i] + m.offset_px
+        by_tile.setdefault(m.j, []).append((m, positions[m.i] + measured))
+        by_tile.setdefault(m.i, []).append((m, positions[m.j] - measured))
+    dropped: set[int] = set()
+    chosen: set[int] = set()
+    for links in by_tile.values():
+        implied = np.array([where for _m, where in links])
+        agree = [np.nonzero(np.hypot(*(implied - v).T) <= radius_px)[0] for v in implied]
+
+        def score(group):
+            return (len(group), sum(links[k][0].confidence for k in group))
+
+        best = max(agree, key=score)
+        current = [k for k, (m, _w) in enumerate(links) if id(m) in taken_ids]
+        if len(best) == 1 and len(links) >= 2 and max(m.confidence for m, _w in links) < LINK_CONFIDENCE:
+            dropped |= {id(m) for m, _w in links}
+            continue
+        if current:
+            in_use = max((agree[k] for k in current), key=score)
+            if set(best.tolist()) == set(in_use.tolist()) or score(best) <= score(in_use):
+                continue
+        elif not (len(best) >= 2 or links[best[0]][0].confidence >= LINK_CONFIDENCE):
+            continue
+        keep = {id(links[k][0]) for k in best}
+        dropped |= {id(m) for m, _w in links} - keep
+        chosen |= keep
+    kept = [m for m in used if id(m) not in dropped or id(m) in chosen]
+    taken = {id(m) for m in kept}
+    return kept + [m for m in candidates if id(m) in chosen and id(m) not in taken]
 
 
 def _consensus_links(candidates, used, positions, stage_positions, n: int, radius_px: float) -> list[PairMatch]:
