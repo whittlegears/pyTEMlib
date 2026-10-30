@@ -87,15 +87,20 @@ def test_the_iterative_solver_agrees_with_the_direct_one_and_reports_convergence
     assert starved["converged"] is False and 7 in starved["istop"]  # an iteration limit is reported, not hidden
 
 
-def test_a_tile_with_no_match_gives_way_to_its_matched_neighbour_where_they_overlap():
+def test_a_tile_with_no_match_is_drawn_only_where_no_placed_tile_is():
     a = mosaic.Tile(np.full((32, 32), 100.0), (16 * PIXEL, 16 * PIXEL), PIXEL, 0)
     b = mosaic.Tile(np.full((32, 32), 200.0), (32 * PIXEL, 16 * PIXEL), PIXEL, 1)
     placement = mosaic.register_tiles([a, b], refine=False)
     placement.fallback = np.array([False, True])
     levels, _ = mosaic.stitch_to_arrays([a, b], placement)
-    overlap = levels[0][:, 16:32]
-    assert overlap.mean() < 150  # equal weights would give 150 in the middle of the overlap
-    assert levels[0][:, 40].mean() == 200  # where only the fallback tile is, it is still drawn
+    assert np.allclose(levels[0][:, 17:31], 100.0, atol=1.0)  # the shared area is the placed tile
+    assert np.allclose(levels[0][:, 40], 200.0)  # where only the unplaced tile is, it shows (vacuum is not black)
+
+
+def test_a_map_where_nothing_matched_is_still_drawn():
+    tile = mosaic.Tile(np.full((32, 32), 7.0), (16 * PIXEL, 16 * PIXEL), PIXEL, 0)
+    levels, placement = mosaic.stitch_to_arrays([tile], mosaic.register_tiles([tile]))
+    assert placement.fallback.all() and np.allclose(levels[0], 7.0)
 
 
 def test_assemble_progress_only_goes_up(tmp_path):
@@ -109,3 +114,26 @@ def test_assemble_progress_only_goes_up(tmp_path):
     seen = []
     tools._run_assemble({"run": path, "eds_pois": True}, lambda done, total=None: seen.append(done))
     assert seen == sorted(seen) and seen[-1] == PROGRESS_STEPS
+
+
+def test_tiles_whose_wrong_links_outnumber_their_right_ones_are_still_placed():
+    rng = np.random.default_rng(11)
+    grid, step = 5, 200.0
+    truth = np.array([[r * step, c * step] for r in range(grid) for c in range(grid)])
+    stage = truth + rng.normal(0, 25.0, truth.shape)
+    island = {18, 19, 23, 24}  # the bottom-right corner
+    matches = []
+    for a in range(grid * grid):
+        for b in (a + 1, a + grid):
+            if b >= grid * grid or (b == a + 1 and b % grid == 0):
+                continue
+            correction = (truth[b] - truth[a]) - (stage[b] - stage[a]) + rng.normal(0, 0.2, 2)
+            matches.append(mosaic.PairMatch(a, b, correction, 0.8))
+    # Three wrong links into the island, each confidently wrong in its own way, against its two right ones.
+    for a, b in ((13, 18), (14, 19), (17, 18)):
+        matches = [m for m in matches if (m.i, m.j) != (a, b)]
+        matches.append(mosaic.PairMatch(a, b, (truth[b] - truth[a]) - (stage[b] - stage[a]) + rng.uniform(60, 120, 2) * rng.choice([-1, 1], 2), 0.6))
+    positions, used, _knots, _drift = mosaic.solve_positions(stage, matches, 25.0)
+    error = (positions - truth) - np.median(positions - truth, axis=0)
+    assert np.hypot(*error[sorted(island)].T).max() < 1.0
+    assert not any((m.i, m.j) in {(13, 18), (14, 19), (17, 18)} for m in used)

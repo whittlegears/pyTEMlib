@@ -53,6 +53,7 @@ PROGRESS_STEPS = 1000  # assemble_map reports progress in these units
 DEFAULT_MAX_CANVAS_PIXELS = 400_000_000_000  # level-0 pixels; memory is bounded, so this only catches wrong metadata
 SCORE_MAX_SIDE = 4096  # score_map reads the finest level no larger than this, never a giant level 0 whole
 BLOCK = 512  # pyramid block and chunk side
+UNPLACED_LISTED = 1000  # unplaced tile indices kept in a map's metadata (the count is always there)
 
 # FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
 _REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
@@ -103,7 +104,7 @@ def inputs_sha256(plan: dict, info, stage_sigma_m: float) -> str:
     """A hash of what a stitch was made from: the run, which of its tiles were used, the settings and this pyTEMlib.
 
     Two map versions with the same hash were stitched from the same inputs the same way."""
-    settings = {k: plan.get(k) for k in ("run", "refine", "box_m", "max_drift_m_per_s", "drift_knot_s")}
+    settings = {k: plan.get(k) for k in ("run", "refine", "box_m", "max_drift_m_per_s", "drift_knot_s", "scan_linear")}
     digest = hashlib.sha256(json.dumps({**settings, "stage_sigma_m": float(stage_sigma_m), "pytemlib": __version__}, sort_keys=True).encode())
     digest.update(np.ascontiguousarray(np.asarray(info.index, dtype=np.int64)).tobytes())
     return digest.hexdigest()
@@ -118,11 +119,21 @@ def stitch_quality(placement) -> dict:
         j = np.array([m.j for m in used])
         offsets = np.array([m.offset_px for m in used])
         p, s = placement.positions_px, placement.stage_positions_px
-        residuals = np.hypot(*((p[j] - p[i]) - (s[j] - s[i] + offsets)).T)
+        # Matches are measured in the tiles' own pixels: compare them with the drawn positions taken back there.
+        residuals = np.hypot(*(((p[j] - p[i]) @ np.asarray(placement.linear).T) - (s[j] - s[i] + offsets)).T)
         out["median_residual_px"] = round(float(np.median(residuals)), 3)
         out["p95_residual_px"] = round(float(np.percentile(residuals, 95)), 3)
     if placement.fallback is not None:
-        out["fallback_tiles"] = int(placement.fallback.sum())
+        out["fallback_tiles"] = int(placement.fallback.sum())  # unplaced: listed, not drawn
+        out["unplaced_tiles"] = [int(k) for k in np.nonzero(placement.fallback)[0][:UNPLACED_LISTED]]
+    if placement.linear_estimate is not None:
+        out["scan_linear"] = {
+            "applied": not np.allclose(placement.linear, np.eye(2)),
+            "matrix": np.round(placement.linear_estimate, 6).tolist(),
+            "stderr": np.round(placement.linear_stderr, 6).tolist(),
+        }
+    if placement.gains is not None:
+        out["tile_gain"] = {"min": round(float(placement.gains.min()), 4), "max": round(float(placement.gains.max()), 4)}
     if placement.solver:
         out["solver"] = placement.solver
     drift = placement.drift_summary()
@@ -190,6 +201,7 @@ class MapTools:
             on_pair=on_pair,
             max_drift_m_per_s=float(plan.get("max_drift_m_per_s", 0.0)),
             drift_knot_s=float(plan.get("drift_knot_s", 120.0)),
+            scan_linear=np.asarray(plan["scan_linear"], dtype=np.float64) if plan.get("scan_linear") is not None else None,
         )
         progress(int(0.7 * PROGRESS_STEPS), PROGRESS_STEPS)
         self._check_canvas(placement.canvas_shape)  # refinement can grow the canvas by a few pixels
@@ -222,6 +234,10 @@ class MapTools:
         }
         if len(run.tiles) <= 10_000:  # per-tile positions are kept for small maps; large ones keep the summary only
             metadata["tile_positions_px"] = placement.positions_px.round(3).tolist()
+            # With the raw tiles, these rebuild the map exactly: drawn value = gain * counts + offset.
+            metadata["tile_gains"] = np.round(placement.gains, 5).tolist() if placement.gains is not None else None
+            metadata["tile_offsets"] = np.round(placement.offsets, 4).tolist() if placement.offsets is not None else None
+            metadata["scan_linear_applied"] = np.asarray(placement.linear).round(6).tolist()
         progress(int(0.99 * PROGRESS_STEPS), PROGRESS_STEPS)  # last chance to abort before the new version is stored
         key = self.store.write_map(plan["run"], writer, metadata, eds_points=eds, previous=previous)
         progress(PROGRESS_STEPS, PROGRESS_STEPS)
@@ -289,7 +305,7 @@ class MapTools:
             "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
             "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
             "points_of_interest": self.store.poi_count(map_key),
-            "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "drift") if k in meta},
+            "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "unplaced_tiles", "scan_linear", "tile_gain", "drift") if k in meta},
             "id": meta.get("id"), "stitched_at": meta.get("stitched_at"), "inputs_sha256": meta.get("inputs_sha256"),
         }
         if meta.get("run"):
@@ -337,6 +353,7 @@ class MapTools:
             stage_sigma_m: float | None = None,
             max_drift_m_per_s: float = 0.0,
             eds_pois: bool = True,
+            scan_linear: list[list[float]] | None = None,
         ) -> dict[str, Any]:
             """Stitch a map run into a zoomable multi-resolution map, in the background. Each call makes a new map
             version; earlier versions and the run's points of interest are kept.
@@ -347,6 +364,8 @@ class MapTools:
             stage_sigma_m: 1-sigma error of the reported stage positions; bounds the overlap search (default 5 % of the field of view).
             max_drift_m_per_s: most the sample drifts (m/s); above 0 a drift over time is fitted.
             eds_pois: mark every EDS point spectrum of the run as a point of interest linked to it.
+            scan_linear: optional 2 x 2 calibration of the scan's shared stretch and turn for this scan setting (a large
+            map's stitching.scan_linear.matrix); without it the map measures its own, which needs a large map.
             Returns a job_id; poll analysis_job_status, then analysis_job_results gives result_keys.map.
             """
             plan = {"task": "assemble_map", "run": run, "refine": refine, "max_drift_m_per_s": max_drift_m_per_s, "eds_pois": eds_pois}
@@ -354,6 +373,8 @@ class MapTools:
                 plan["stage_sigma_m"] = stage_sigma_m
             if box_m:
                 plan["box_m"] = box_m
+            if scan_linear is not None:
+                plan["scan_linear"] = scan_linear
             reserved = tools.jobs.reserve(plan)
             if "error" in reserved:
                 return reserved

@@ -22,10 +22,19 @@ So placement starts from each tile's reported stage position and refines it:
    the solve repeated. The pairs are then matched again with each window
    centred on the stage position plus the fitted drift, and solved again, so
    pairs whose drift moved them out of the first window still count. A tile
-   with no usable match keeps its drift-corrected stage position and is
-   flagged in ``Placement.fallback``.
+   with no usable match keeps its drift-corrected stage position, is flagged
+   in ``Placement.fallback`` and is drawn only where no placed tile is
+   (vacuum, holes and blank film rarely match); the map's metadata lists it.
+   Once placed, the matched tiles also give two things the stage cannot: the
+   scan's shared stretch, turn and shear against the stage
+   (``estimate_scan_linear``, applied only when measured clearly) and each
+   tile's gain and offset (``solve_gain_offset``), so tiles taken far apart in
+   time, while the detector drifted, meet without a brightness step.
 3. The canvas is written block by block (``block`` x ``block`` pixels) in
-   quadtree order: each pyramid level's block is made from the four blocks
+   quadtree order. Each tile is resampled onto the canvas at its sub-pixel
+   position (cubic spline), with the scan's shared distortion undone, its
+   gain and offset applied and a weight falling linearly to its edges, so
+   overlaps cross-fade. Each pyramid level's block is made from the four blocks
    below it as soon as they are done. Peak memory is a few blocks per level,
    whatever the map size; tiles are read through the sequence passed in, so a
    lazy sequence (see pyTEMlib.mcp_server.map_store) keeps them out of memory
@@ -41,7 +50,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
 import numpy as np
-from scipy import sparse
+from scipy import ndimage, sparse
+from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import lsqr, spsolve
 from skimage.registration._masked_phase_cross_correlation import cross_correlate_masked
 
@@ -50,9 +60,23 @@ from skimage.registration._masked_phase_cross_correlation import cross_correlate
 MIN_STAGE_SIGMA_PX = 1.0
 HUBER_PX = 0.5  # matches agree with the solution to ~0.1 px; beyond this their weight falls off
 ROBUST_ROUNDS = 10
+SCALE_ROUNDS = 2  # solves with the stage prior in the tiles' own scale (see register_tiles)
+READMIT_ROUNDS = 3  # times dropped matches that agree with the solution are taken back and the solve repeated
+LINK_CONFIDENCE = 0.7  # one link alone may join two groups of tiles only this confident
 DIRECT_SOLVE_MAX = 400_000  # unknowns solved directly; more use lsqr
 LSQR_ITERATIONS = 50_000
-FALLBACK_WEIGHT = 0.25  # blend weight of a tile with no usable match: its neighbours' pixels win where they overlap
+LINEAR_SIGNIFICANCE = 3.0  # the scan's shared distortion is removed only when measured this many standard errors from none
+LINEAR_MIN_TILES = 9
+GAIN_MIN_OVERLAP_PX = 16  # a shared area narrower than this says too little about two tiles' brightness
+GAIN_PRIOR_SIGMA = 0.1  # a detector's gain is expected within about 10 % of nominal (offsets: 10 % of the signal level)
+GAIN_RATE_SHARE = 0.2  # ...and to change by at most a fifth of that between two knots
+GAIN_KNOT_S = 300.0  # gain and offset are modelled at one knot per this many seconds of acquisition
+GAIN_LIMITS = (0.8, 1.25)  # never correct a tile's gain beyond these, whatever the overlaps say
+OFFSET_LIMIT_SHARE = 0.3  # nor its offset beyond this share of the signal level
+FALLBACK_WEIGHT = 1e-3  # an unplaced tile is drawn only where no placed tile is (vacuum, holes, blank film)
+LINEAR_MIN_EFFECT_PX = 0.1  # the scan's shared distortion is removed only when it moves a tile corner at least this much
+WHOLE_PIXEL_PX = 0.01  # a tile this close to a whole-pixel position is copied rather than resampled
+SPLINE_MARGIN_PX = 12  # tile pixels kept around the part a block needs; the cubic spline's reach decays well within it
 STRIP_PX = 8192  # pairs are matched in vertical strips this wide, so the tiles read stay few (see pairwise_offsets)
 
 
@@ -91,6 +115,17 @@ class Placement:
     drift_times_s: np.ndarray | None = None  # knot times, seconds after the first tile
     drift_px: np.ndarray | None = None  # (knots, 2) sample drift (row, col) at each knot
     solver: dict | None = None  # how the last solve went: method, converged, iterations
+    # Canvas pixels -> tile pixels about a tile's centre: the scan's shared stretch, turn and shear, removed when
+    # drawing (identity when it was not measured to be different from none; see estimate_scan_linear).
+    linear: np.ndarray = field(default_factory=lambda: np.eye(2))
+    linear_estimate: np.ndarray | None = None  # what was measured, applied or not
+    linear_stderr: np.ndarray | None = None
+    gains: np.ndarray | None = None  # (n,) drawn value = gain * counts + offset (see solve_gain_offset)
+    offsets: np.ndarray | None = None
+
+    def centres_px(self, shapes: np.ndarray) -> np.ndarray:
+        """(n, 2) canvas (row, col) of each tile's centre."""
+        return self.positions_px + (np.asarray(shapes, dtype=np.float64) - 1) / 2.0
 
     def pixel_to_stage(self, row: float, col: float) -> tuple[float, float]:
         return (self.origin_xy_m[0] + col * self.pixel_size_m, self.origin_xy_m[1] + row * self.pixel_size_m)
@@ -251,6 +286,23 @@ def bounded_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px:
     return np.array(a.shape, dtype=np.float64) - 1.0 - k
 
 
+def _overlap_crops(a_shape, b_shape, predicted: np.ndarray, bound: float) -> tuple[tuple[tuple[slice, slice], np.ndarray], tuple[tuple[slice, slice], np.ndarray]]:
+    """The parts of tiles a and b that can overlap when b sits within ``bound`` of ``predicted`` relative to a:
+    ((slices of a, their origin in a), (slices of b, their origin in b))."""
+    margin = int(np.ceil(bound)) + 2
+    a_slices, b_slices, a_origin, b_origin = [], [], [], []
+    for axis in range(2):
+        shift = int(np.round(predicted[axis]))
+        lo, hi = max(0, shift) - margin, min(a_shape[axis], shift + b_shape[axis]) + margin  # in a's pixels
+        a_lo, a_hi = max(0, lo), min(a_shape[axis], hi)
+        b_lo, b_hi = max(0, lo - shift), min(b_shape[axis], hi - shift)
+        a_slices.append(slice(a_lo, a_hi))
+        b_slices.append(slice(b_lo, b_hi))
+        a_origin.append(a_lo)
+        b_origin.append(b_lo)
+    return (tuple(a_slices), np.array(a_origin, dtype=np.float64)), (tuple(b_slices), np.array(b_origin, dtype=np.float64))
+
+
 def pairwise_offsets(
     tiles: Sequence[Tile],
     positions: np.ndarray,
@@ -295,10 +347,15 @@ def pairwise_offsets(
             dt = abs(times[j] - times[i]) if times is not None else 0.0
             bound = 4.0 * np.sqrt(2.0) * sigma + max_drift_px_per_s * dt + 2.0
         bound = min(bound, 0.6 * min(height, width))
-        overlap_ratio = 0.5 * min(height * width / a.size, height * width / b.size)
-        shift = bounded_shift(a, b, predicted, bound, overlap_ratio)
+        # Correlate only the predicted overlap plus the search bound on each side: the rest of each tile
+        # cannot meet the other within the bound, and leaving it out makes each correlation several times smaller.
+        (ca, oa), (cb, ob) = _overlap_crops(a.shape, b.shape, predicted, bound)
+        a_part, b_part = a[ca], b[cb]
+        overlap_ratio = 0.5 * min(height * width / a_part.size, height * width / b_part.size)
+        shift = bounded_shift(a_part, b_part, predicted + ob - oa, bound, min(overlap_ratio, 1.0))
         if shift is None:
             continue
+        shift = shift - ob + oa
         confidence = _overlap_ncc(a, b, shift, min_overlap_px)
         if confidence is None or confidence < min_confidence:
             continue
@@ -360,37 +417,96 @@ def solve_positions(
     stage sigmas, are dropped. Returns
     (positions, matches used, knot times, drift at knots).
     """
-    used = [m for m in matches if m.confidence >= min_confidence]
+    candidates = [m for m in matches if m.confidence >= min_confidence]
     knots = _knots(times_s, drift_knot_s, len(stage_positions)) if max_drift_px_per_s > 0 else None
-    robust = np.ones(len(used))
-    positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
     # A match must also agree with the stage once the fitted drift is removed: the two stage
     # readings differ by at most bound_sigmas combined stage sigmas. This catches a wrong peak in a
     # low-texture overlap that nothing else contradicts (its only other constraint is the weak prior).
     bound = bound_sigmas * np.sqrt(2.0) * max(stage_sigma_px, MIN_STAGE_SIGMA_PX) + 1.0
-    for round_ in range(ROBUST_ROUNDS):
-        if not used:
-            break
-        i = np.array([m.i for m in used])
-        j = np.array([m.j for m in used])
-        offsets = np.array([m.offset_px for m in used])
+
+    def check(group, positions, drift):
+        """Each match's residual against the solve and its disagreement with the drift-corrected stage."""
+        i = np.array([m.i for m in group])
+        j = np.array([m.j for m in group])
+        offsets = np.array([m.offset_px for m in group])
         residuals = np.hypot(*((positions[j] - positions[i]) - (stage_positions[j] - stage_positions[i] + offsets)).T)
         drift_at = _drift_at(times_s, knots, drift) if drift is not None else np.zeros_like(stage_positions)
-        disagreement = np.hypot(*(offsets - (drift_at[j] - drift_at[i])).T)
+        return residuals, np.hypot(*(offsets - (drift_at[j] - drift_at[i])).T)
+
+    def cutoff_of(residuals):
         mad = float(np.median(np.abs(residuals - np.median(residuals))))
-        cutoff = max(outlier_px, float(np.median(residuals)) + 5.0 * 1.4826 * mad)
-        keep = residuals <= cutoff
-        if round_ > 0:  # the drift is only trusted once a first robust solve has fitted it
-            keep &= disagreement <= bound
-        # Huber weights: a match a little off (a weak, slightly wrong peak) counts less instead of
-        # bending its neighbours and the drift fit; one far off is dropped outright.
-        new_robust = np.minimum(1.0, HUBER_PX / np.maximum(residuals, 1e-9))[keep]
-        if keep.all() and np.allclose(new_robust, robust, atol=0.02):
-            break
-        used = [m for m, k in zip(used, keep) if k]
-        robust = new_robust
+        return max(outlier_px, float(np.median(residuals)) + 5.0 * 1.4826 * mad)
+
+    def robust_solve(used, trust_drift):
+        robust = np.ones(len(used))
         positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
+        for round_ in range(ROBUST_ROUNDS):
+            if not used:
+                break
+            residuals, disagreement = check(used, positions, drift)
+            # Drop the worst first: a wrong match bends its neighbours in the solve, so correct matches around it
+            # look bad too until it is gone. Only matches within a factor two of the largest residual go this
+            # round; the rest are judged again once the solve no longer carries the worst.
+            keep = residuals <= max(cutoff_of(residuals), 0.5 * float(residuals.max()))
+            if trust_drift or round_ > 0:  # the drift is only trusted once a first robust solve has fitted it
+                keep &= disagreement <= bound
+            # Huber weights: a match a little off (a weak, slightly wrong peak) counts less instead of
+            # bending its neighbours and the drift fit; one far off is dropped outright.
+            new_robust = np.minimum(1.0, HUBER_PX / np.maximum(residuals, 1e-9))[keep]
+            if keep.all() and np.allclose(new_robust, robust, atol=0.02):
+                break
+            used = [m for m, k in zip(used, keep) if k]
+            robust = new_robust
+            positions, drift = _solve_once(stage_positions, used, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info)
+        return positions, used, drift
+
+    positions, used, drift = robust_solve(candidates, trust_drift=False)
+    # A correct match is not wrong for good because it was dropped while wrong ones still bent the solve. Two ways
+    # back, until nothing changes: a match that agrees with the solution found without the wrong ones; and, where the
+    # used matches split the tiles into separate groups (a few tiles whose wrong links outnumbered their right ones),
+    # the links between two groups that agree with each other on how far one group must move.
+    for _ in range(READMIT_ROUNDS):
+        if not used or not candidates:
+            break
+        residuals, disagreement = check(candidates, positions, drift)
+        cutoff = cutoff_of(check(used, positions, drift)[0])
+        back = [m for m, r, d in zip(candidates, residuals, disagreement) if r <= cutoff and d <= bound]
+        back += _consensus_links(candidates, back, positions, stage_positions, len(stage_positions), outlier_px)
+        if {id(m) for m in back} == {id(m) for m in used}:
+            break
+        positions, used, drift = robust_solve(back, trust_drift=True)
     return positions, used, knots, drift
+
+
+def _consensus_links(candidates, used, positions, stage_positions, n: int, radius_px: float) -> list[PairMatch]:
+    """Links between groups of tiles the used matches do not join, kept when they agree on the groups' offset.
+
+    Each unused link between two groups says how far one group must move against the other. The largest set
+    of links between the same two groups that agree within ``radius_px`` is kept when it has at least two links,
+    or one of confidence LINK_CONFIDENCE or more; links that contradict each other join nothing.
+    """
+    if not used:
+        return []
+    i = np.array([m.i for m in used])
+    j = np.array([m.j for m in used])
+    graph = sparse.coo_matrix((np.ones(len(used)), (i, j)), shape=(n, n))
+    _count, group = connected_components(graph, directed=False)
+    taken = {id(m) for m in used}
+    between: dict[tuple[int, int], list[tuple[PairMatch, np.ndarray]]] = {}
+    for m in candidates:
+        if id(m) in taken or group[m.i] == group[m.j]:
+            continue
+        correction = (positions[m.j] - positions[m.i]) - (stage_positions[m.j] - stage_positions[m.i] + m.offset_px)
+        key, sign = ((group[m.i], group[m.j]), 1.0) if group[m.i] < group[m.j] else ((group[m.j], group[m.i]), -1.0)
+        between.setdefault(key, []).append((m, sign * correction))
+    joined: list[PairMatch] = []
+    for links in between.values():
+        vectors = np.array([v for _m, v in links])
+        agree = [np.nonzero(np.hypot(*(vectors - v).T) <= radius_px)[0] for v in vectors]
+        best = max(agree, key=len)
+        if len(best) >= 2 or (len(best) == 1 and links[best[0]][0].confidence >= LINK_CONFIDENCE):
+            joined += [links[k][0] for k in best]
+    return joined
 
 
 def _solve_once(stage_positions, matches, stage_sigma_px, match_sigma_px, times_s, knots, max_drift_px_per_s, robust, info=None):
@@ -470,13 +586,19 @@ def register_tiles(
     on_pair: Callable[[int, int], None] | None = None,
     max_drift_m_per_s: float = 0.0,
     drift_knot_s: float = 120.0,
+    scan_linear: np.ndarray | None = None,
 ) -> Placement:
     """Place tiles by stage position, then refine with bounded image matching and (with times) a drift model.
 
     ``stage_sigma_m``: 1-sigma error of the reported stage positions (sets the
     search bound and the prior). ``max_drift_m_per_s``: the most the sample
     drifts relative to the stage; 0 turns the drift model off. Tiles need
-    ``acquired_s`` for the drift model.
+    ``acquired_s`` for the drift model. ``scan_linear``: a calibration of the
+    scan's shared stretch, turn and shear (the 2 x 2 map from stage pixels to
+    tile pixels, as ``Placement.linear_estimate`` reports it), measured once
+    for this scan setting, for example on a large map; it is applied as given.
+    Without it the map measures its own, which only a large map can do: the
+    stage's error hides a 1 % scale error on a few dozen tiles.
     """
     stage_px, pixel, origin = place_by_stage(tiles)
     sigma_px = stage_sigma_m / pixel
@@ -499,6 +621,32 @@ def register_tiles(
                 m.offset_px = m.offset_px + (correction[m.j] - correction[m.i])  # relative to the stage again, as the solve expects
             if matches:
                 positions, used, knots, drift = solve_positions(stage_px, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s, info=info)
+        # The stage prior is in the stage's scale and the matches in the tiles' own. When the scan is stretched or
+        # turned against the stage (1 % is common), the prior pulls a large map toward the stage's scale and bends it
+        # by about a pixel, and the bend makes the stretch look smaller than it is. So put the prior in the tiles'
+        # scale and solve again, until the stretch measured from the solve stops changing.
+        half = (tile_arrays(tiles)["shapes"].astype(np.float64) - 1) / 2.0
+        base = {id(m): m.offset_px.copy() for m in matches}
+        for _ in range(SCALE_ROUNDS):
+            matched_now = np.zeros(len(tiles), bool)
+            for m in used:
+                matched_now[m.i] = matched_now[m.j] = True
+            corrected = stage_px + _drift_at(times, knots, drift) if drift is not None else stage_px
+            if scan_linear is not None:
+                scale = np.asarray(scan_linear, dtype=np.float64).reshape(2, 2)
+            else:
+                scale, _stderr, trusted = estimate_scan_linear(corrected + half, positions + half, matched_now)
+                if not (trusted and _linear_matters(scale, half * 2 + 1)):
+                    break
+            centre = (stage_px + half).mean(axis=0)
+            prior = (stage_px + half - centre) @ scale.T + centre - half
+            for m in matches:
+                m.offset_px = base[id(m)] + (stage_px[m.j] - stage_px[m.i]) - (prior[m.j] - prior[m.i])
+            positions, used, knots, drift = solve_positions(prior, matches, sigma_px, min_confidence=min_confidence, times_s=times, drift_knot_s=drift_knot_s, max_drift_px_per_s=drift_px_s, info=info)
+            if scan_linear is not None:
+                break
+        for m in matches:  # offsets are reported relative to the stage again
+            m.offset_px = base[id(m)]
     else:
         positions, used = stage_px.copy(), []
     used_ids = {id(m) for m in used}
@@ -507,14 +655,135 @@ def register_tiles(
         m.used = id(m) in used_ids
         if m.used:
             matched[m.i] = matched[m.j] = True
+    shapes = tile_arrays(tiles)["shapes"].astype(np.float64)
+    gains, offsets = solve_gain_offset(tiles, positions, [m for m in matches if m.used])
+    # Against the stage plus the fitted drift: in a raster, drift grows with position and would look like a stretch.
+    expected = stage_px + _drift_at(times, knots, drift) if drift is not None else stage_px
+    linear, linear_stderr, applied = estimate_scan_linear(expected + (shapes - 1) / 2.0, positions + (shapes - 1) / 2.0, matched)
+    estimate = linear
+    applied = applied and _linear_matters(linear, shapes)
+    if scan_linear is not None:
+        linear, applied = np.asarray(scan_linear, dtype=np.float64).reshape(2, 2), True
+    if applied:
+        # The tiles' own pixels are stretched and turned relative to the stage (field-of-view calibration, scan
+        # rotation, shear): put the tile centres back on the stage's scale; assembly resamples each tile to match.
+        centres = positions + (shapes - 1) / 2.0
+        middle = centres[matched].mean(axis=0)
+        positions = (centres - middle) @ np.linalg.inv(linear).T + middle - (shapes - 1) / 2.0
+    corners = _footprint_corners(linear if applied else np.eye(2), shapes)
     # Shift so the canvas starts at (0, 0), and move the origin with it.
-    shift = positions.min(axis=0)
+    shift = (positions + (shapes - 1) / 2.0 + corners[0]).min(axis=0) + 0.5
     positions = positions - shift
     stage_px = stage_px - shift
     origin = (origin[0] + shift[1] * pixel, origin[1] + shift[0] * pixel)
-    shapes = tile_arrays(tiles)["shapes"]
-    canvas = tuple(int(np.ceil(v)) for v in (positions + shapes).max(axis=0))
-    return Placement(positions, stage_px, matches, canvas, origin, pixel, fallback=~matched if refine else None, drift_times_s=knots, drift_px=drift, solver=info or None)
+    canvas = tuple(int(np.ceil(v)) for v in (positions + (shapes - 1) / 2.0 + corners[1] + 0.5).max(axis=0))
+    return Placement(
+        positions, stage_px, matches, canvas, origin, pixel, fallback=~matched if refine else None, drift_times_s=knots, drift_px=drift,
+        solver=info or None, linear=linear if applied else np.eye(2), linear_estimate=estimate, linear_stderr=linear_stderr, gains=gains, offsets=offsets,
+    )
+
+
+def _footprint_corners(linear: np.ndarray, shapes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(lowest, highest) (row, col) reach of each tile's pixels from its centre on the canvas, per tile."""
+    inverse = np.linalg.inv(linear)
+    half = shapes / 2.0
+    signs = np.array([[-1, -1], [-1, 1], [1, -1], [1, 1]], dtype=np.float64)
+    reach = np.stack([(half * s) @ inverse.T for s in signs])  # (4, n, 2)
+    return reach.min(axis=0), reach.max(axis=0)
+
+
+def estimate_scan_linear(stage_centres: np.ndarray, centres: np.ndarray, matched: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+    """The scan's own geometry against the stage's: the 2 x 2 map A with tile centres = A @ stage centres + b.
+
+    Measured from the matched tiles, whose centres follow their images: a field-of-view calibration error
+    stretches A, scan rotation turns it, shear skews it. The stage's random error averages out over many
+    tiles, so A is only trusted (``applied``) when it differs from no distortion by more than
+    LINEAR_SIGNIFICANCE standard errors; a small map leaves it alone. Returns (A, standard errors, applied).
+    """
+    identity = np.eye(2)
+    n = int(matched.sum())
+    if n < LINEAR_MIN_TILES:
+        return identity, np.full((2, 2), np.inf), False
+    # The stage readings carry the noise and the tile centres hardly any, so the stage is regressed on the centres
+    # (noise in the regressor would shrink the fitted slope toward zero) and the result inverted.
+    design = np.hstack([centres[matched], np.ones((n, 1))])
+    coef, *_ = np.linalg.lstsq(design, stage_centres[matched], rcond=None)
+    residual = stage_centres[matched] - design @ coef
+    variance = (residual**2).sum(axis=0) / max(n - 3, 1)  # per output axis
+    unscaled = np.diag(np.linalg.pinv(design.T @ design))[:2]
+    stderr = np.sqrt(np.outer(variance, unscaled))  # of the stage-from-tile map; A is near identity, so A's are the same
+    linear = np.linalg.inv(coef[:2].T)
+    applied = bool(np.any(np.abs(linear - identity) > LINEAR_SIGNIFICANCE * stderr))
+    return linear, stderr, applied
+
+
+def _linear_matters(linear: np.ndarray, shapes: np.ndarray) -> bool:
+    """Whether undoing ``linear`` moves a tile corner by at least LINEAR_MIN_EFFECT_PX."""
+    return float(np.abs(linear - np.eye(2)).max() * shapes.max()) >= LINEAR_MIN_EFFECT_PX
+
+
+def solve_gain_offset(tiles: Sequence[Tile], positions_px: np.ndarray, matches: Sequence[PairMatch]) -> tuple[np.ndarray, np.ndarray]:
+    """Gain and offset per tile that make overlapping tiles agree in brightness (drawn = gain * counts + offset).
+
+    For each used pair the shared area's spread gives the ratio of the two tiles' gains (the same sample seen
+    twice, so its contrast differs only by the gain) and its mean the offsets once the gains are known.
+
+    A detector drifts in time, not in space, so when every tile has an acquisition time the gain and offset are
+    smooth functions of time (piecewise linear, one knot per GAIN_KNOT_S) with a prior on how fast they change;
+    per-tile values would let each pair's small error add up along chains of tiles across a large map. Without
+    times each tile gets its own values. Either way a prior pulls gain to 1 and offset to 0, gains are capped to
+    GAIN_LIMITS, and tiles in no used pair keep (1, 0) unless the time model covers them.
+    """
+    n = len(tiles)
+    pairs = []
+    for m in matches:
+        a, b = np.asarray(tiles[m.i].image), np.asarray(tiles[m.j].image)
+        d = np.round(positions_px[m.j] - positions_px[m.i]).astype(int)
+        r0, c0 = max(0, d[0]), max(0, d[1])
+        r1, c1 = min(a.shape[0], d[0] + b.shape[0]), min(a.shape[1], d[1] + b.shape[1])
+        if r1 - r0 < GAIN_MIN_OVERLAP_PX or c1 - c0 < GAIN_MIN_OVERLAP_PX:
+            continue
+        pa = a[r0:r1, c0:c1].astype(np.float64)  # slice, then convert: never a whole tile in float64
+        pb = b[r0 - d[0] : r1 - d[0], c0 - d[1] : c1 - d[1]].astype(np.float64)
+        sa, sb = float(pa.std()), float(pb.std())
+        if sa > 0 and sb > 0:
+            pairs.append((m.i, m.j, float(pa.mean()), float(pb.mean()), np.log(sb / sa), pa.size, (sa + sb) / 2.0))
+    if not pairs:
+        return np.ones(n), np.zeros(n)
+    i = np.array([p[0] for p in pairs])
+    j = np.array([p[1] for p in pairs])
+    size = np.array([p[5] for p in pairs], dtype=np.float64)
+    spread = np.array([p[6] for p in pairs])
+    times = _times(tiles)
+    knots = _knots(times, GAIN_KNOT_S, max(n, 20)) if times is not None else None
+    if knots is not None:  # unknowns: the values at the knots; tile k is a mix of the two knots around its time
+        left, frac = _interp_weights(times, knots)
+        count = len(knots)
+        mix = sparse.csr_matrix(
+            (np.concatenate([1.0 - frac, frac]), (np.concatenate([np.arange(n)] * 2), np.concatenate([left, left + 1]))), shape=(n, count)
+        )
+    else:
+        count = n
+        mix = sparse.identity(n, format="csr")
+    difference = mix[i] - mix[j]  # one row per pair: unknowns of i minus unknowns of j
+
+    def solve(target: np.ndarray, sigma: np.ndarray, prior_sigma: float) -> np.ndarray:
+        rows = [sparse.diags(1.0 / sigma) @ difference, sparse.identity(count, format="csr") / prior_sigma]
+        rhs = [target / sigma, np.zeros(count)]
+        if knots is not None and count > 1:  # how fast the detector may change between knots
+            step = sparse.diags([-np.ones(count - 1), np.ones(count - 1)], [0, 1], shape=(count - 1, count)) / (prior_sigma * GAIN_RATE_SHARE)
+            rows.append(step)
+            rhs.append(np.zeros(count - 1))
+        return lsqr(sparse.vstack(rows).tocsr(), np.concatenate(rhs), atol=1e-12, btol=1e-12)[0]
+
+    # The log of a spread measured over N pixels is uncertain by about sqrt(1 / (2 N)) per tile, so a pair by 1 / sqrt(N).
+    log_gain = mix @ solve(np.array([p[4] for p in pairs]), 1.0 / np.sqrt(size), GAIN_PRIOR_SIGMA)
+    gains = np.clip(np.exp(log_gain), *GAIN_LIMITS)
+    level = float(np.median([abs(p[2]) + abs(p[3]) for p in pairs])) / 2.0 + 1.0
+    target = gains[j] * np.array([p[3] for p in pairs]) - gains[i] * np.array([p[2] for p in pairs])
+    offsets = mix @ solve(target, spread / np.sqrt(size) + 1e-9, GAIN_PRIOR_SIGMA * level)
+    offsets = np.clip(offsets, -OFFSET_LIMIT_SHARE * level, OFFSET_LIMIT_SHARE * level)
+    return gains, offsets
 
 
 def _cast(array: np.ndarray, dtype) -> np.ndarray:
@@ -522,13 +791,6 @@ def _cast(array: np.ndarray, dtype) -> np.ndarray:
         info = np.iinfo(dtype)
         return np.clip(np.rint(array), info.min, info.max).astype(dtype)
     return array.astype(dtype)
-
-
-def _blend_weight(shape: tuple[int, int]) -> np.ndarray:
-    """Linear ramp to the tile edges, so overlaps cross-fade instead of showing a seam."""
-    r = np.minimum(np.arange(shape[0]) + 1, shape[0] - np.arange(shape[0])).astype(np.float32)
-    c = np.minimum(np.arange(shape[1]) + 1, shape[1] - np.arange(shape[1])).astype(np.float32)
-    return np.outer(r, c)
 
 
 def pyramid_levels(canvas_shape: tuple[int, int], min_size: int = 256) -> int:
@@ -592,15 +854,34 @@ def assemble(
     dtype = np.dtype(dtype or np.result_type(*{np.asarray(tiles[k].image).dtype for k in range(min(len(tiles), 4))}))
     for level, shape in enumerate(shapes):
         writer.create(level, shape, dtype, block)
-    tops = np.round(placement.positions_px).astype(np.int64)
-    tile_shapes = tile_arrays(tiles)["shapes"]
-    gains = np.where(placement.fallback, FALLBACK_WEIGHT, 1.0) if placement.fallback is not None else np.ones(len(tops))
+    tile_shapes = tile_arrays(tiles)["shapes"].astype(np.float64)
+    centres = placement.centres_px(tile_shapes)
+    linear = np.asarray(placement.linear, dtype=np.float64)
+    low, high = _footprint_corners(linear, tile_shapes)
+    lows = np.floor(centres + low).astype(np.int64)
+    highs = np.ceil(centres + high).astype(np.int64)
+    # An unplaced tile (no usable match: vacuum, a hole, blank film) is drawn only where no placed tile is.
+    tile_weight = np.where(placement.fallback, FALLBACK_WEIGHT, 1.0) if placement.fallback is not None else np.ones(len(tiles))
+    drawn = np.ones(len(tiles), bool)
+    corner = centres - (tile_shapes - 1) / 2.0
+    whole = np.allclose(linear, np.eye(2)) & np.all(np.abs(corner - np.round(corner)) < WHOLE_PIXEL_PX, axis=1)  # copied, not resampled
+    gains = placement.gains if placement.gains is not None else np.ones(len(tiles))
+    offsets = placement.offsets if placement.offsets is not None else np.zeros(len(tiles))
     index: dict[tuple[int, int], list[int]] = {}
-    for k, ((top, left), (h, w)) in enumerate(zip(tops, tile_shapes)):
-        for bi in range(max(0, top) // block, (top + h - 1) // block + 1):
-            for bj in range(max(0, left) // block, (left + w - 1) // block + 1):
-                index.setdefault((bi, bj), []).append(k)
-    weight_by_shape: dict[tuple[int, int], np.ndarray] = {}
+    for k in np.nonzero(drawn)[0]:
+        for bi in range(max(0, lows[k][0]) // block, max(0, highs[k][0]) // block + 1):
+            for bj in range(max(0, lows[k][1]) // block, max(0, highs[k][1]) // block + 1):
+                index.setdefault((bi, bj), []).append(int(k))
+
+    def sample(k: int, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Tile k's values at tile coordinates (u, v), by cubic spline over just the part of the tile they need."""
+        th, tw = (int(x) for x in tile_shapes[k])
+        u0, u1 = max(0, int(np.floor(u.min())) - SPLINE_MARGIN_PX), min(th, int(np.ceil(u.max())) + SPLINE_MARGIN_PX + 1)
+        v0, v1 = max(0, int(np.floor(v.min())) - SPLINE_MARGIN_PX), min(tw, int(np.ceil(v.max())) + SPLINE_MARGIN_PX + 1)
+        part = np.asarray(tiles[k].image)[u0:u1, v0:v1].astype(np.float64)
+        coefficients = ndimage.spline_filter(part, order=3, mode="mirror")
+        return ndimage.map_coordinates(coefficients, [u - u0, v - v0], order=3, prefilter=False, mode="mirror")
+
     total = sum(-(-h // block) * -(-w // block) for h, w in shapes)
     done = [0]
 
@@ -617,21 +898,38 @@ def assemble(
         acc = np.zeros((r1 - r0, c1 - c0), dtype=np.float64)
         wsum = np.zeros_like(acc)
         for k in index.get((bi, bj), ()):
-            top, left = tops[k]
-            th, tw = tile_shapes[k]
-            rr0, rr1 = max(r0, top), min(r1, top + th)
-            cc0, cc1 = max(c0, left), min(c1, left + tw)
+            rr0, rr1 = max(r0, lows[k][0]), min(r1, highs[k][0] + 1)
+            cc0, cc1 = max(c0, lows[k][1]), min(c1, highs[k][1] + 1)
             if rr0 >= rr1 or cc0 >= cc1:
                 continue
-            shape = (int(th), int(tw))
-            weight = weight_by_shape.get(shape)
-            if weight is None:
-                weight = weight_by_shape[shape] = _blend_weight(shape)
-            image = np.asarray(tiles[k].image)
-            sub = image[rr0 - top : rr1 - top, cc0 - left : cc1 - left].astype(np.float64)
-            ws = weight[rr0 - top : rr1 - top, cc0 - left : cc1 - left] * gains[k]
-            acc[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += sub * ws
-            wsum[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += ws
+            # Each canvas pixel looks up where it falls in the tile (sub-pixel, with the scan's shared distortion
+            # undone) and takes the tile's value there by cubic-spline interpolation: no rounding to whole pixels.
+            th, tw = tile_shapes[k]
+            if whole[k]:
+                top, left = (int(v) for v in np.round(corner[k]))
+                rr0, rr1, cc0, cc1 = max(rr0, top), min(rr1, top + int(th)), max(cc0, left), min(cc1, left + int(tw))
+                if rr0 >= rr1 or cc0 >= cc1:
+                    continue
+                u = np.arange(rr0 - top, rr1 - top, dtype=np.float64)[:, None]
+                v = np.arange(cc0 - left, cc1 - left, dtype=np.float64)[None, :]
+                weight = np.minimum(u + 1.0, th - u) * np.minimum(v + 1.0, tw - v) * tile_weight[k]
+                sub = np.asarray(tiles[k].image)[rr0 - top : rr1 - top, cc0 - left : cc1 - left].astype(np.float64) * gains[k] + offsets[k]
+                acc[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += sub * weight
+                wsum[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += weight
+                continue
+            dr = (np.arange(rr0, rr1) - centres[k][0]).astype(np.float32)[:, None]  # float32 is 1e-4 px at 512 px
+            dc = (np.arange(cc0, cc1) - centres[k][1]).astype(np.float32)[None, :]
+            u = np.float32(linear[0, 0]) * dr + np.float32(linear[0, 1]) * dc + np.float32((th - 1) / 2.0)
+            v = np.float32(linear[1, 0]) * dr + np.float32(linear[1, 1]) * dc + np.float32((tw - 1) / 2.0)
+            # The cross-fade weight: a linear ramp to zero half a pixel outside the tile's edge pixels.
+            weight = np.clip(np.minimum(u + 1.0, th - u), 0.0, None) * np.clip(np.minimum(v + 1.0, tw - v), 0.0, None)
+            weight[(u < -0.5) | (u > th - 0.5) | (v < -0.5) | (v > tw - 0.5)] = 0.0
+            weight *= tile_weight[k]
+            if not weight.any():
+                continue
+            sub = sample(k, u, v) * gains[k] + offsets[k]
+            acc[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += sub * weight
+            wsum[rr0 - r0 : rr1 - r0, cc0 - c0 : cc1 - c0] += weight
         out = np.divide(acc, wsum, out=np.zeros_like(acc), where=wsum > 0).astype(np.float32)
         emit(0, r0, c0, out)
         return out
