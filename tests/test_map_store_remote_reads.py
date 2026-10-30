@@ -145,7 +145,7 @@ def test_every_eds_spectrum_is_a_point_of_interest_and_restitching_keeps_one_eac
 def test_a_failed_restitch_leaves_the_old_map_and_its_points(tmp_path, monkeypatch):
     tools, path, key = stitched(tmp_path)
     before = tools.store.poi_count(key)
-    monkeypatch.setattr(tools.store, "update_pois", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(tools.store, "_add_to", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": path, "eds_pois": True})["reservation_id"])
     assert tools.jobs.wait(job["job_id"])["state"] == "failed"
     monkeypatch.undo()
