@@ -338,10 +338,10 @@ def test_cli_defaults_keep_the_asyncroscopy_launch_command(monkeypatch, tmp_path
     with pytest.raises(SystemExit):
         cli.main(["--tiled", "http://localhost:9091", "--api-key", "secret", "--port", "8003"])
     assert seen["args"] == ("http://localhost:9091", "secret")
-    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000_000, "trace_path": "outputs/trace/analysis.jsonl", "annotations_path": "outputs/annotations/notes.jsonl"}
+    assert seen["kwargs"] == {"local_roots": None, "max_canvas_pixels": 400_000_000_000, "trace_path": "outputs/trace/analysis.jsonl", "annotations_path": "outputs/annotations/notes.jsonl", "placements_path": "outputs/placements/placements.jsonl"}
     with pytest.raises(SystemExit):
         cli.main(["--local-root", str(tmp_path), "--local-root", "data", "--max-canvas-megapixels", "50"])
-    assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000, "trace_path": "outputs/trace/analysis.jsonl", "annotations_path": "outputs/annotations/notes.jsonl"}
+    assert seen["kwargs"] == {"local_roots": [str(tmp_path), "data"], "max_canvas_pixels": 50_000_000, "trace_path": "outputs/trace/analysis.jsonl", "annotations_path": "outputs/annotations/notes.jsonl", "placements_path": "outputs/placements/placements.jsonl"}
 
 
 def test_status_can_wait_for_the_job(client, run_file):
