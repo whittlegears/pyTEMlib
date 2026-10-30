@@ -431,6 +431,23 @@ class MapStore:
             "use a Tiled key, move the file under one of them, or start the server with --local-root <dir>"
         )
 
+    def dataset_key(self, key: str) -> str | None:
+        """The one name a dataset's notes are kept under: the resolved path of a local HDF5 file under the roots,
+        or a key the Tiled server has; None when there is no such dataset. A Tiled error other than a missing
+        key (server down, refused) raises, so it is reported rather than read as "no dataset"."""
+        try:
+            if self.is_local(key):
+                return str(Path(key).resolve())
+        except LocalPathRefused:
+            return None
+        if not self.tiled_uri:
+            return None
+        try:
+            self.client[key]
+        except KeyError:
+            return None
+        return key
+
     @staticmethod
     def map_name(run: str) -> str:
         stem = Path(run).name

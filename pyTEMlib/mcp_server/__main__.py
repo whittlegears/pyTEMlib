@@ -27,10 +27,15 @@ def main(argv: list[str] | None = None) -> None:
         "--trace", default="outputs/trace/analysis.jsonl",
         help="JSON-lines file with one line per tool call: tool, arguments, calling agent and run, outcome (empty: none).",
     )
+    parser.add_argument(
+        "--annotations", default="outputs/annotations/notes.jsonl",
+        help="JSON-lines event file of the notes people and agents put on datasets (empty: no note tools).",
+    )
     args = parser.parse_args(argv)
     mcp, tools = create_server(
         args.tiled or None, args.api_key, local_roots=args.local_root,
         max_canvas_pixels=int(args.max_canvas_megapixels * 1e6), trace_path=args.trace or None,
+        annotations_path=args.annotations or None,
     )
     if args.transport == "stdio":
         mcp.run(transport="stdio")
