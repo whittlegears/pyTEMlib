@@ -40,9 +40,10 @@ def image_node(store, key: str):
     if getattr(node, "structure_family", None) == "container":
         group = node["image"] if "image" in node else node
         arrays = [group[name] for name in group if getattr(group[name], "structure_family", None) == "array"]
-        if not arrays:
+        placed = [a for a in arrays if "pixel_size_m" in dict(a.metadata)]
+        if not (placed or arrays):
             raise FrameError(f"{key} holds no image array")
-        node = arrays[0]
+        node = (placed or arrays)[0]
     return node
 
 
@@ -65,6 +66,8 @@ def frame_of(store, key: str) -> dict[str, Any]:
     region = _vector(m.get("scan_region"))
     if region is not None and region != [0.0, 0.0, 1.0, 1.0]:
         raise FrameError(f"{key} covers part of the scan field ({region}); its pixels cannot be placed on the stage yet")
+    if not all(math.isfinite(v) for v in stage[:5]):
+        raise FrameError(f"{key} records a stage position that is not a number ({stage}); it cannot be placed on the stage")
     tilts = stage[3:5]
     if any(abs(t) > MAX_TILT_DEG for t in tilts):
         raise FrameError(f"{key} was taken at tilt {tilts} degrees; the flat pixel-to-stage transform would be wrong there")
