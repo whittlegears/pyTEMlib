@@ -66,6 +66,7 @@ def test_a_stage_aimed_image_is_placed_where_it_really_is_and_logged(setup):
     assert record["status"] == "placed", record["reason"]
     assert np.hypot(*(np.array(record["centre_xy_m"]) - true_xy)) < 0.3 * STEP * 1e-9
     assert record["sample_id"] == "grid-7" and record["child"] == "close.h5" and record["parent"] == "survey.h5"
+    assert record["child_shape"] == [256, 256]
     assert log.read()[-1]["id"] == record["id"]
 
 

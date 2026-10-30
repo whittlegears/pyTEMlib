@@ -91,7 +91,7 @@ def place(store, log: PlacementLog, image: str, parent: str, centre_xy_m: list[f
     c1 = int(min(cols_total, math.ceil(col + half[1] + window_px + EDGE_PX) + 1))
     record: dict[str, Any] = {
         "child": image, "parent": parent, "parent_kind": parent_frame["kind"], "predicted_xy_m": centre, "window_m": float(window_m),
-        "child_pixel_m": child_px, "parent_pixel_m": parent_px, **child_frame.get("sample", {}),
+        "child_pixel_m": child_px, "parent_pixel_m": parent_px, "child_shape": [int(v) for v in child_frame["shape"]], **child_frame.get("sample", {}),
     }
     if parent_frame["kind"] == "map":
         record["parent_version"] = parent_frame["metadata"].get("version") or parent
