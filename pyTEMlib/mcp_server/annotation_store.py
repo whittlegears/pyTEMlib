@@ -198,11 +198,13 @@ class AnnotationStore:
                 "at": time.time(), "author": _short(author), "run": _short(run), **({"fields": fields} if fields is not None else {})}
 
     def create(self, dataset: str, shape: str, coords: dict, frame: str, note: str = "", kind: str = "note",
-               links: list[str] | None = None, author: str | None = None, run: str | None = None) -> dict:
+               links: list[str] | None = None, author: str | None = None, run: str | None = None, sample: dict | None = None) -> dict:
+        """``sample``: the dataset's sample_id and sample_load_id, kept with the note so its position is known to belong to that load."""
         geometry = _check_geometry(shape, frame, coords)
         text, kind, links = _check_text(note, kind, links)
         note_id = uuid.uuid4().hex[:12]
         fields = {"shape": shape, "frame": frame, "coords": geometry, "note": text, "kind": kind, "links": links}
+        fields.update({k: _short(v) for k, v in (sample or {}).items() if k in ("sample_id", "sample_load_id") and isinstance(v, str) and v})
         with self._locked():
             if len(self._notes_of(dataset)) >= MAX_NOTES_PER_DATASET:
                 raise AnnotationError("too_many", f"{dataset} already has {MAX_NOTES_PER_DATASET} notes")
@@ -273,9 +275,9 @@ def _error(exc: AnnotationError) -> dict:
     return {"error": {"code": exc.code, "message": str(exc)}}
 
 
-def register(mcp, store: AnnotationStore, dataset_key: Callable[[str], str | None]) -> None:
+def register(mcp, store: AnnotationStore, dataset_key: Callable[[str], str | None], sample_of: Callable[[str], dict]) -> None:
     """Add the note tools to ``mcp``. ``dataset_key(dataset)`` gives the one name a dataset's notes are kept under,
-    or None when there is no such dataset."""
+    or None when there is no such dataset; ``sample_of(key)`` the sample_id and sample_load_id it recorded."""
 
     def who(reported_by: str | None) -> tuple[str | None, str | None]:
         caller, run = _caller()
@@ -299,7 +301,7 @@ def register(mcp, store: AnnotationStore, dataset_key: Callable[[str], str | Non
             return {"error": {"code": "unknown_dataset", "message": f"no dataset or map {dataset!r} to annotate"}}
         author, run = who(reported_by)
         try:
-            return store.create(key, shape, coords, frame, note, kind, links, author, run)
+            return store.create(key, shape, coords, frame, note, kind, links, author, run, sample_of(key))
         except AnnotationError as exc:
             return _error(exc)
 

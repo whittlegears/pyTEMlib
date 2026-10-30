@@ -205,3 +205,20 @@ def test_the_command_line_server_builds_with_notes_in_a_fresh_process(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     assert "annotate" in out.stdout and "list_annotations" in out.stdout
+
+
+def test_a_note_keeps_the_sample_load_its_dataset_recorded(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data = tmp_path / "image.h5"
+    with h5py.File(data, "w") as h5:
+        h5["x"] = [1, 2, 3]
+        h5.attrs.update({"sample_id": "grid 12", "sample_load_id": "load-1", "id": "d1"})
+    bare = tmp_path / "bare.h5"
+    with h5py.File(bare, "w") as h5:
+        h5["x"] = [1]
+    mcp, _tools = create_server(local_roots=[tmp_path], include_basic=False, annotations_path=str(tmp_path / "notes.jsonl"))
+    made = _call(mcp, "annotate", {"dataset": str(data), "shape": "pin", "coords": {"x": 1, "y": 2}, "frame": "pixel"})
+    assert made["sample_id"] == "grid 12" and made["sample_load_id"] == "load-1"
+    edited = _call(mcp, "edit_annotation", {"id": made["id"], "note": "moved on"})
+    assert edited["sample_load_id"] == "load-1"
+    assert "sample_load_id" not in _call(mcp, "annotate", {"dataset": str(bare), "shape": "pin", "coords": {"x": 0, "y": 0}, "frame": "pixel"})

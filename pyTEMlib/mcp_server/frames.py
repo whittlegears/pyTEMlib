@@ -54,7 +54,7 @@ def frame_of(store, key: str) -> dict[str, Any]:
     except (KeyError, ValueError, FileNotFoundError):
         meta = None
     if meta and meta.get("kind") == "stitched_map":
-        return {"kind": "map", "metadata": meta, "pixel_size_m": float(meta["pixel_size_m"]), "shape": list(meta["canvas_shape"])}
+        return {"kind": "map", "metadata": meta, "pixel_size_m": float(meta["pixel_size_m"]), "shape": list(meta["canvas_shape"]), "sample": store.sample_of(key)}
     node = image_node(store, key)
     m = dict(node.metadata)
     stage = _vector(m.get("stage_reported_m")) or _vector(m.get("stage_commanded_m"))
@@ -72,7 +72,7 @@ def frame_of(store, key: str) -> dict[str, Any]:
     if any(abs(t) > MAX_TILT_DEG for t in tilts):
         raise FrameError(f"{key} was taken at tilt {tilts} degrees; the flat pixel-to-stage transform would be wrong there")
     shape = list(node.structure().shape)[-2:]
-    return {"kind": "image", "centre_xy_m": stage[:2], "pixel_size_m": float(pixel), "shape": shape}
+    return {"kind": "image", "centre_xy_m": stage[:2], "pixel_size_m": float(pixel), "shape": shape, "sample": store.sample_of(key)}
 
 
 def stage_of(frame: dict, row: float, col: float) -> tuple[float, float]:
@@ -112,8 +112,13 @@ def register(mcp, store) -> None:
             return {"error": {"code": "no_frame", "message": str(exc)}}
         x, y = stage_of(frame, row, col)
         rows, cols = frame["shape"]
+        notes = ["image shift is not recorded with an image, so it is not included"] if frame["kind"] == "image" else []
+        notes.append(
+            "before moving there, check the instrument's get_sample gives this sample_load_id: another load puts the sample elsewhere"
+            if frame["sample"].get("sample_load_id") else "this dataset does not record which sample load it was taken on"
+        )
         return {"x_m": x, "y_m": y, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"],
-                **({"note": "image shift is not recorded with an image, so it is not included"} if frame["kind"] == "image" else {})}
+                **frame["sample"], "note": "; ".join(notes)}
 
     @mcp.tool()
     def to_pixel(dataset: str, x_m: float, y_m: float) -> dict[str, Any]:
@@ -128,4 +133,4 @@ def register(mcp, store) -> None:
             return {"error": {"code": "no_frame", "message": str(exc)}}
         row, col = pixel_of(frame, x_m, y_m)
         rows, cols = frame["shape"]
-        return {"row": row, "col": col, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"]}
+        return {"row": row, "col": col, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"], **frame["sample"]}

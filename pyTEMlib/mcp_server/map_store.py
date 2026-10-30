@@ -541,7 +541,7 @@ class MapStore:
 
     def write_map(self, run: str, writer, metadata: dict, pois: list[dict]) -> str:
         """Finish a map written through ``map_writer``: metadata, the POI layer with ``pois``, then the swap."""
-        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, **metadata}
+        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], **self.sample_of(run), **metadata}
         try:
             staged = writer.finish(metadata)
         except Exception as exc:
@@ -567,6 +567,33 @@ class MapStore:
             return self.list_pois(key) if key else []
         except (OSError, KeyError, ValueError):  # unreadable or not a map: nothing to keep
             return []
+
+    def sample_of(self, key: str) -> dict:
+        """{"sample_id", "sample_load_id"} a dataset recorded (asyncroscopy writes them on the file, and a stitched map
+        copies its run's); {} when it recorded none or cannot be read. A key inside a file (``file.h5/image/HAADF``)
+        is looked up on the file it is in."""
+        try:
+            found = self._own_sample(key)
+            while not found and "/" in key.strip("/") and not self._local(key):
+                key = key.strip("/").rsplit("/", 1)[0]
+                found = self._own_sample(key)
+        except Exception:  # a refused path or a Tiled error: the sample is unknown, which callers report
+            return {}
+        return found
+
+    def _own_sample(self, key: str) -> dict:
+        try:
+            if self._local(key):
+                with _POI_LOCK, h5py.File(key, "r") as h5:
+                    meta = {k: h5.attrs[k] for k in h5.attrs}
+            else:
+                meta = dict(self.client[key].metadata)
+        except (OSError, KeyError, ValueError, LocalPathRefused):
+            return {}
+        if "metadata" in meta:  # a local stitched map keeps its metadata as one JSON attribute
+            meta = {**meta, **(_decode(meta["metadata"]) or {})}
+        found = {k: meta.get(k) for k in ("sample_id", "sample_load_id")}
+        return {k: (v.decode() if isinstance(v, bytes) else v) for k, v in found.items() if isinstance(v, (str, bytes)) and v}
 
     def map_metadata(self, map_key: str) -> dict:
         if self.is_local(map_key) or map_key.endswith(".tmp"):

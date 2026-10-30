@@ -74,7 +74,7 @@ def create_server(
     if annotations_path:
         from .annotation_store import AnnotationStore, register as register_notes
 
-        register_notes(mcp, AnnotationStore(annotations_path), tools.store.dataset_key)
+        register_notes(mcp, AnnotationStore(annotations_path), tools.store.dataset_key, tools.store.sample_of)
     return mcp, tools
 
 
