@@ -43,6 +43,7 @@ def create_server(
     max_canvas_pixels: int = DEFAULT_MAX_CANVAS_PIXELS,
     trace_path: str | None = None,
     annotations_path: str | None = None,
+    placements_path: str | None = None,
 ) -> tuple[FastMCP, MapTools]:
     """Build a new MCP server; returns (FastMCP app, MapTools) so callers can also use the tools directly.
 
@@ -51,7 +52,9 @@ def create_server(
     largest level-0 map ``assemble_map`` will stitch (it is held in memory). ``trace_path``: a JSON-lines
     file that gets one line per tool call (tool, arguments, the calling agent and run, outcome).
     ``annotations_path``: the JSON-lines event file of the notes people and agents put on datasets
-    (annotate, list_annotations, ...); without it the note tools are not offered.
+    (annotate, list_annotations, ...); without it the note tools are not offered. ``placements_path``: the
+    JSON-lines log of finer images placed on coarser ones (place_image, list_placements); without it those
+    tools are not offered.
 
     Every call returns a fresh FastMCP instance, so calling it twice never
     registers a tool twice. The basic tools are mounted from
@@ -75,6 +78,10 @@ def create_server(
         from .annotation_store import AnnotationStore, register as register_notes
 
         register_notes(mcp, AnnotationStore(annotations_path), tools.store.dataset_key, tools.store.sample_of)
+    if placements_path:
+        from .placement_tools import PlacementLog, register as register_placements
+
+        register_placements(mcp, tools.store, PlacementLog(placements_path))
     return mcp, tools
 
 

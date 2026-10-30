@@ -31,11 +31,15 @@ def main(argv: list[str] | None = None) -> None:
         "--annotations", default="outputs/annotations/notes.jsonl",
         help="JSON-lines event file of the notes people and agents put on datasets (empty: no note tools).",
     )
+    parser.add_argument(
+        "--placements", default="outputs/placements/placements.jsonl",
+        help="JSON-lines log of finer images placed on coarser ones (empty: no placement tools).",
+    )
     args = parser.parse_args(argv)
     mcp, tools = create_server(
         args.tiled or None, args.api_key, local_roots=args.local_root,
         max_canvas_pixels=int(args.max_canvas_megapixels * 1e6), trace_path=args.trace or None,
-        annotations_path=args.annotations or None,
+        annotations_path=args.annotations or None, placements_path=args.placements or None,
     )
     if args.transport == "stdio":
         mcp.run(transport="stdio")
