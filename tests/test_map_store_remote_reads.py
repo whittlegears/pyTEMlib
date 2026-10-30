@@ -136,18 +136,22 @@ def test_every_eds_spectrum_is_a_point_of_interest_and_restitching_keeps_one_eac
     store.add_pois(key, [{"id": "note1", "x_m": eds[0]["x_m"], "y_m": eds[0]["y_m"], "kind": "note"}])
     job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": path, "eds_pois": True, "refine": False})["reservation_id"])
     assert tools.jobs.wait(job["job_id"])["state"] == "done"
-    assert len(store.list_pois(key, kind="eds_point")) == 9 and [p["id"] for p in store.list_pois(key, kind="note")] == ["note1"]
+    again = store.current_map(path)
+    assert again != key
+    for version in (key, again):  # the points belong to the run, so every version lists the same ones
+        assert len(store.list_pois(version, kind="eds_point")) == 9 and [p["id"] for p in store.list_pois(version, kind="note")] == ["note1"]
 
 
 def test_a_failed_restitch_leaves_the_old_map_and_its_points(tmp_path, monkeypatch):
     tools, path, key = stitched(tmp_path)
     before = tools.store.poi_count(key)
-    monkeypatch.setattr(tools.store, "add_pois", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(tools.store, "update_pois", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
     job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": path, "eds_pois": True})["reservation_id"])
     assert tools.jobs.wait(job["job_id"])["state"] == "failed"
     monkeypatch.undo()
     assert tools.store.poi_count(key) == before and tools.store.map_metadata(key)["kind"] == "stitched_map"
     assert not list(tmp_path.glob("*.tmp"))  # the half-written new map was removed
+    assert tools.store.current_map(path) == key
 
 
 def test_poi_layer_answers_box_queries_at_a_hundred_thousand_points_reading_only_the_cells_it_touches(tmp_path, monkeypatch):
@@ -181,12 +185,14 @@ def test_adding_points_with_ids_twice_stores_them_once_and_replacing_switches_la
     assert store.add_pois(key, [note], dedupe=True) == [note]
     assert store.add_pois(key, [note], dedupe=True) == []
     assert len(store.list_pois(key, kind="high_mag")) == 1
-    old_layer = store.map_metadata(key).get("poi_layer", "poi")
+    points, meta = store._points_at(key)
+    old_layer = meta["poi_layer"]
     store.update_pois(key, lambda current: [p for p in current if p["kind"] != "high_mag"])
-    meta = store.map_metadata(key)
+    meta = store._points_at(key)[1]
     assert meta["poi_layer"] != old_layer and store.poi_count(key) == 9
-    with h5py.File(key, "r") as h5:
-        assert old_layer not in h5
+    assert [entry["layer"] for entry in meta["layers"]][-1] == old_layer
+    with h5py.File(points, "r") as h5:
+        assert old_layer in h5  # the replaced layer is kept, not deleted
 
 
 def test_a_second_assemble_of_the_same_run_is_busy_and_names_the_running_job(tmp_path, monkeypatch):
@@ -205,7 +211,7 @@ def test_a_second_assemble_of_the_same_run_is_busy_and_names_the_running_job(tmp
     assert "error" not in tools.jobs.reserve({"task": "assemble_map", "run": path})
 
 
-def test_a_replaced_map_node_is_deleted_with_everything_tiled_wrote():
+def test_an_abandoned_map_version_is_deleted_with_everything_tiled_wrote():
     calls = []
 
     class Node:

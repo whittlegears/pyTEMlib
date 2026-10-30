@@ -248,10 +248,10 @@ def test_restitching_keeps_points_of_interest(client, run_file):
     poi = call(c, "add_poi", map=map_key, x_m=(x0 + x1) / 2, y_m=(y0 + y1) / 2, kind="eds_point", links=["spectrum_001.h5"])
 
     again = finish(c, tools, call(c, "assemble_map", run=run_file, refine=False)["job_id"])["result_keys"]["map"]
-    assert again == map_key
-    meta = tools.store.map_metadata(map_key)
-    assert meta["refined"] is False  # the map really was rewritten
-    assert tools.store.list_pois(map_key) == [poi]
+    assert again != map_key  # a new version beside the first, which is kept
+    assert tools.store.map_metadata(map_key)["refined"] is True and tools.store.map_metadata(again)["refined"] is False
+    assert tools.store.current_map(run_file) == again
+    assert tools.store.list_pois(again) == [poi] and tools.store.list_pois(map_key) == [poi]
 
 
 def test_local_paths_outside_the_roots_are_refused(client_factory, tmp_path):
@@ -359,9 +359,9 @@ def test_map_info_names_the_runs_stitched_map_and_counts_tiles(client, run_file)
     with pytest.raises(Exception, match="not been stitched.*assemble_map"):
         call(c, "map_info", map=run_file)
     map_key = finish(c, tools, call(c, "assemble_map", run=run_file)["job_id"])["result_keys"]["map"]
-    with pytest.raises(Exception, match=r"is a Mapper run, not a stitched map; its stitched map is .*_map\.h5"):
+    with pytest.raises(Exception, match=r"is a Mapper run, not a stitched map; its newest stitched map is .*_map_\w+\.h5"):
         call(c, "map_info", map=run_file)
-    with pytest.raises(ValueError, match="its stitched map is"):
+    with pytest.raises(ValueError, match="its newest stitched map is"):
         tools.store.map_metadata(run_file)
     info = call(c, "map_info", map=map_key)
     assert info["tiles"] == 9 and info["run"] == run_file

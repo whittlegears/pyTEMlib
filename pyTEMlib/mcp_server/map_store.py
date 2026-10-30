@@ -20,17 +20,24 @@ cache of bounded size (``TileSource``, which counts its reads).
 The stitched map is stored next to the run: ``level_0`` .. ``level_N``
 chunked arrays (each half the size of the one before), written block by
 block as the stitcher makes them, plus metadata holding the pixel-to-stage
-transform and the stitching quality. A re-stitch writes a complete new map
-before the old one is removed (a new file swapped in atomically, or a new
-Tiled key), so a failed re-stitch never loses the old map or its points.
+transform and the stitching quality. Every stitch is a new version under its
+own key (``<run>_map_<UTC time>_<hex>``, or that name with ``.h5`` beside a
+local run) and no version is ever deleted or overwritten, so anything placed
+on or cited from a map keeps it. ``list_maps`` lists a run's versions, newest
+first; ``current_map`` is the newest. Maps stitched before versions existed
+keep their key ``<run>_map``.
 
-Points of interest live in a layer beside the levels, built for maps with a
-million of them: EDS points are kept in a grid of spatial cells (each with
-its count), so a query for a stage box reads only the cells it touches and a
-count reads no points; the few other points (scored regions, high
-magnification images, notes) are kept together as "highlights". Adding
-points costs the points added; replacing them builds a new layer and switches
-to it in one metadata update.
+Points of interest belong to the run, not to a map version: they are in stage
+metres, so one point store per run (``<run>_points``) serves every version of
+its map. The store is built for a million points: EDS points are kept in a
+grid of spatial cells (each with its count), so a query for a stage box reads
+only the cells it touches and a count reads no points; the few other points
+(scored regions, high magnification images, notes) are kept together as
+"highlights". Adding points costs the points added; replacing them builds a
+new layer and switches to it in one metadata update, and the replaced layer is
+kept and listed in the store's ``layers``. Maps stitched before point stores
+existed kept their points inside the map; those are read from there until the
+run's store is made, which copies them in once (``migrated_from``).
 
 The same functions work against a Tiled server (keys) or the filesystem
 (paths). Local paths are accepted only under the store's ``local_roots``
@@ -301,10 +308,11 @@ class TileSource:
 
 
 class _LocalMapWriter:
-    """Writes the new map to a temporary file next to the old one; ``finish`` swaps it in atomically."""
+    """Writes a new map version to a temporary file; ``swap`` renames it to its own versioned name."""
 
     def __init__(self, path: Path):
         self.path = path
+        self.name = str(path)
         self.tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:8]}.tmp")
         self.h5 = h5py.File(self.tmp, "w")
 
@@ -336,10 +344,10 @@ class _LocalMapWriter:
 
 
 class _TiledMapWriter:
-    """Writes the new map under a new key; ``swap`` removes the previous map once the new one is complete."""
+    """Writes a new map version under its own key; earlier versions are left as they are."""
 
-    def __init__(self, store: "MapStore", container, name: str, previous: str | None):
-        self.store, self.container, self.name, self.previous = store, container, name, previous
+    def __init__(self, store: "MapStore", container, name: str):
+        self.store, self.container, self.name = store, container, name
         self.nodes: dict[int, Any] = {}
         self.block = 0
 
@@ -369,8 +377,6 @@ class _TiledMapWriter:
         return self.name
 
     def swap(self) -> str:
-        if self.previous and self.previous != self.name and self.previous in self.store.client:
-            _delete_node(self.store.client[self.previous])
         return self.name
 
     def abandon(self) -> None:
@@ -381,7 +387,8 @@ class _TiledMapWriter:
 
 
 def _delete_node(node) -> None:
-    """Delete a Tiled node and everything under it, data written through Tiled included."""
+    """Delete a Tiled node and everything under it, data written through Tiled included. Used only to remove a
+    map version whose writing failed, before anything could name it."""
     if hasattr(node, "delete_tree"):
         node.delete_tree()
     else:  # tiled 0.2: delete() removes this node; external_only=False also removes data Tiled wrote itself
@@ -449,26 +456,53 @@ class MapStore:
         return key
 
     @staticmethod
-    def map_name(run: str) -> str:
+    def _stem(run: str) -> str:
         stem = Path(run).name
         for suffix in (".h5", ".hdf5"):
             if stem.endswith(suffix):
                 stem = stem[: -len(suffix)]
-        return f"{stem}_map"
+        return stem
 
-    def local_map_path(self, run: str) -> Path:
-        return Path(run).with_name(self.map_name(run) + ".h5")
+    @classmethod
+    def map_name(cls, run: str) -> str:
+        """The name every map version of ``run`` starts with (and the whole key of a map stitched before versions)."""
+        return f"{cls._stem(run)}_map"
+
+    @staticmethod
+    def version_suffix() -> str:
+        now = time.time()
+        return f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime(now))}{int(now % 1 * 1000):03d}Z_{uuid.uuid4().hex[:4]}"
+
+    def list_maps(self, run: str) -> list[dict]:
+        """Every stitched version of ``run``'s map, newest first: {"map", "id", "stitched_at", "inputs_sha256", "tiles"}."""
+        found: list[tuple[str, dict]] = []
+        if self.is_local(run):
+            name = self.map_name(run)
+            for path in Path(run).parent.glob(f"{name}*.h5"):
+                if path.name != f"{name}.h5" and not path.name.startswith(f"{name}_"):
+                    continue
+                try:
+                    with _POI_LOCK, h5py.File(path, "r") as h5:
+                        meta = json.loads(h5.attrs["metadata"])
+                except (OSError, KeyError, ValueError):
+                    continue
+                if meta.get("kind") == "stitched_map" and Path(str(meta.get("run", ""))).resolve() == Path(run).resolve():
+                    found.append((str(path), meta))
+        else:
+            from tiled.queries import Key
+
+            for key, node in self.client.search(Key("kind") == "stitched_map").search(Key("run") == run).items():
+                found.append((key, dict(node.metadata)))
+        found.sort(key=lambda item: (float(_decode(item[1].get("stitched_at")) or 0.0), item[0]), reverse=True)
+        return [
+            {"map": key, "id": meta.get("id"), "stitched_at": _decode(meta.get("stitched_at")), "inputs_sha256": meta.get("inputs_sha256"), "tiles": _decode(meta.get("tiles"))}
+            for key, meta in found
+        ]
 
     def current_map(self, run: str) -> str | None:
-        """Key or path of the map stitched from ``run``, or None."""
-        if self.is_local(run):
-            path = self.local_map_path(run)
-            return str(path) if path.exists() else None
-        from tiled.queries import Key
-
-        found = self.client.search(Key("kind") == "stitched_map").search(Key("run") == run)
-        keys = sorted(found.keys())
-        return keys[-1] if keys else None
+        """Key or path of the newest map stitched from ``run``, or None."""
+        maps = self.list_maps(run)
+        return maps[0]["map"] if maps else None
 
     # -------------------------------------------------------------- runs
     def scan_run(self, run: str, box_m: list[float] | None = None) -> RunInfo:
@@ -528,20 +562,24 @@ class MapStore:
 
     # -------------------------------------------------------------- maps
     def map_writer(self, run: str):
-        """A LevelWriter for a new map of ``run`` (see mosaic.assemble); pass it to ``write_map`` when assembled.
+        """A LevelWriter for a new map version of ``run`` (see mosaic.assemble); pass it to ``write_map`` when assembled.
 
-        The previous map of the run stays until ``write_map`` has finished the new one.
+        Earlier versions of the run's map are never touched.
         """
+        name = f"{self.map_name(run)}_{self.version_suffix()}"
         if self.is_local(run):
-            return _LocalMapWriter(self.local_map_path(run))
-        previous = self.current_map(run)
-        name = self.map_name(run) if previous is None else f"{self.map_name(run)}_{time.strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:4]}"
+            return _LocalMapWriter(Path(run).with_name(f"{name}.h5"))
         container = self.client.create_container(name, metadata={"kind": "stitching", "run": run})
-        return _TiledMapWriter(self, container, name, previous)
+        return _TiledMapWriter(self, container, name)
 
-    def write_map(self, run: str, writer, metadata: dict, pois: list[dict]) -> str:
-        """Finish a map written through ``map_writer``: metadata, the POI layer with ``pois``, then the swap."""
-        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], **self.sample_of(run), **metadata}
+    def write_map(self, run: str, writer, metadata: dict, eds_points: list[dict] | None = None, previous: str | None = None) -> str:
+        """Finish a map written through ``map_writer``: its metadata, the run's point store, then its final name.
+
+        ``eds_points`` (when given) replace the run's EDS points that came from the run itself (``source`` "run"),
+        at their newly stitched positions. ``previous``: the run's newest map before this one, whose points are
+        copied into the run's point store if it was stitched before point stores existed.
+        """
+        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], "version": writer.name, **self.sample_of(run), **metadata}
         try:
             staged = writer.finish(metadata)
         except Exception as exc:
@@ -553,20 +591,14 @@ class MapStore:
                 ) from exc
             raise
         try:
-            if pois:
-                self.add_pois(staged, pois)
+            self._ensure_points(staged, legacy=previous)
+            if eds_points is not None:
+                fresh = list(eds_points)
+                self.update_pois(staged, lambda current: [p for p in current if not (p.get("kind") == "eds_point" and p.get("source") == "run")] + fresh)
         except Exception:
             writer.abandon()
             raise
         return writer.swap()
-
-    def existing_pois(self, run: str) -> list[dict]:
-        """Points of interest of the map previously stitched from ``run`` (empty if there is none)."""
-        try:
-            key = self.current_map(run)
-            return self.list_pois(key) if key else []
-        except (OSError, KeyError, ValueError):  # unreadable or not a map: nothing to keep
-            return []
 
     def sample_of(self, key: str) -> dict:
         """{"sample_id", "sample_load_id"} a dataset recorded (asyncroscopy writes them on the file, and a stitched map
@@ -607,7 +639,7 @@ class MapStore:
             except Exception:  # not a run either: no stitched map to name
                 stitched = None
             if stitched:
-                raise ValueError(f"{map_key} is a Mapper run, not a stitched map; its stitched map is {stitched!r}: pass that.")
+                raise ValueError(f"{map_key} is a Mapper run, not a stitched map; its newest stitched map is {stitched!r} (list_maps lists every version): pass that.")
             raise ValueError(
                 f"{map_key} is not a stitched map (a Mapper run is not one, and this one has not been stitched); "
                 f"stitch it with assemble_map(run={map_key!r}) and pass the key from its results (result_keys.map)."
@@ -616,6 +648,65 @@ class MapStore:
 
     def _local(self, map_key: str) -> bool:
         return map_key.endswith(".tmp") or self.is_local(map_key)
+
+    # -------------------------------------------------------------- the run's point store
+    def points_key(self, run: str, local: bool) -> str:
+        """Where ``run``'s points of interest are kept: ``<run>_points.h5`` beside a local run, else the key ``<run>_points``."""
+        name = f"{self._stem(run)}_points"
+        return str(Path(run).with_name(f"{name}.h5")) if local else name
+
+    def _store_of(self, map_key: str, meta: dict) -> str | None:
+        """The run's point store for this map when it exists; None for a map with no run or whose run has none yet."""
+        run = meta.get("run")
+        if not run:
+            return None
+        local = self._local(map_key)
+        key = self.points_key(str(run), local)
+        if local:
+            return key if Path(key).exists() else None
+        return key if key in self.client else None
+
+    def _store_meta(self, key: str) -> dict:
+        if key.endswith(".h5"):
+            with _POI_LOCK, h5py.File(key, "r") as h5:
+                return json.loads(h5.attrs["metadata"])
+        return {k: _decode(v) for k, v in dict(self.client[key].metadata).items()}
+
+    def _points_at(self, map_key: str) -> tuple[str, dict]:
+        """Where to read a map's points: the run's store, or the map itself when its run has no store yet."""
+        meta = self.map_metadata(map_key)
+        store = self._store_of(map_key, meta)
+        return (store, self._store_meta(store)) if store else (map_key, meta)
+
+    def _ensure_points(self, map_key: str, legacy: str | None = "") -> tuple[str, dict]:
+        """The run's point store for this map, made on first use. A new store copies in the points that ``legacy``
+        (default: this map) kept inside itself before point stores existed. A map with no run keeps its own points."""
+        with _POI_LOCK:
+            meta = self.map_metadata(map_key)
+            store = self._store_of(map_key, meta)
+            if store:
+                return store, self._store_meta(store)
+            if not meta.get("run"):
+                return map_key, meta
+            source = map_key if legacy == "" else legacy
+            carried: list[dict] = []
+            if source:
+                try:
+                    carried = self._list_in(source, self.map_metadata(source))
+                except (OSError, KeyError, ValueError):
+                    carried = []
+            key = self.points_key(str(meta["run"]), self._local(map_key))
+            store_meta = {"kind": "poi_store", "run": meta["run"], "grid": self._grid(map_key, meta), "poi_layer": "poi", "layers": []}
+            if carried:
+                store_meta["migrated_from"] = source
+            if key.endswith(".h5"):
+                with h5py.File(key, "x") as h5:
+                    h5.attrs["metadata"] = json.dumps(store_meta)
+            else:
+                self.client.create_container(key, metadata=store_meta)
+            if carried:
+                self.add_pois_to_layer(key, store_meta, carried)
+            return key, store_meta
 
     def read_level(self, map_key: str, level: int, rows: slice = slice(None), cols: slice = slice(None)) -> np.ndarray:
         if self._local(map_key):
@@ -631,8 +722,11 @@ class MapStore:
 
     # -------------------------------------------------------------- points of interest
     def _grid(self, map_key: str, meta: dict | None = None) -> dict:
-        """The POI layer's cell grid: origin and cell size in metres, cells per side."""
+        """The POI layer's cell grid: origin and cell size in metres, cells per side (a point store keeps the grid
+        of the map it was made for)."""
         meta = meta or self.map_metadata(map_key)
+        if "grid" in meta:
+            return _decode(meta["grid"])
         h, w = (int(v) for v in meta["canvas_shape"])
         pixel = float(meta["pixel_size_m"])
         ox, oy = (float(v) for v in meta["origin_xy_m"])
@@ -654,7 +748,10 @@ class MapStore:
 
         With a box, only the spatial cells the box touches are read.
         """
-        meta = self.map_metadata(map_key)
+        key, meta = self._points_at(map_key)
+        return self._list_in(key, meta, kind, box_m, limit)
+
+    def _list_in(self, map_key: str, meta: dict, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None) -> list[dict]:
         out = list(_decode(meta.get("pois", [])) or [])  # maps written before the layer kept them here
         grid = self._grid(map_key, meta)
         cells = None
@@ -679,15 +776,15 @@ class MapStore:
 
     def poi_kinds(self, map_key: str) -> list[str]:
         """The kinds of point the map holds, from its highlights and stored cell counts (no cell is read)."""
-        meta = self.map_metadata(map_key)
-        found = {str(p.get("kind")) for p in (_decode(meta.get("pois", [])) or []) + self._read_group(map_key, meta, HIGHLIGHTS)}
+        key, meta = self._points_at(map_key)
+        found = {str(p.get("kind")) for p in (_decode(meta.get("pois", [])) or []) + self._read_group(key, meta, HIGHLIGHTS)}
         if any(n > 0 for n in self.poi_counts(map_key)["cells"].values()):
             found |= CELL_KINDS
         return sorted(found)
 
     def poi_counts(self, map_key: str) -> dict:
         """Points per cell and in total, from stored counts (no point is read): {"total", "highlights", "cells": {"i_j": n}, "grid"}."""
-        meta = self.map_metadata(map_key)
+        map_key, meta = self._points_at(map_key)
         layer = self._layer_name(meta)
         cells: dict[str, int] = {}
         highlights = 0
@@ -743,7 +840,7 @@ class MapStore:
         new = list(new)
         if not new:
             return new
-        meta = self.map_metadata(map_key)
+        map_key, meta = self._ensure_points(map_key)
         grid = self._grid(map_key, meta)
         groups: dict[str, list[dict]] = {}
         for p in new:
@@ -780,29 +877,25 @@ class MapStore:
         _replace_metadata(group, {"count": int(_decode(group.metadata.get("count", 0)) or 0) + len(points)})
 
     def update_pois(self, map_key: str, change: Callable[[list[dict]], list[dict]]) -> list[dict]:
-        """Replace the map's points with ``change(current)``.
+        """Replace the run's points with ``change(current)``.
 
-        A new layer is built beside the current one and the map's metadata is switched to it in
-        one update, so readers see either all the old points or all the new ones.
+        A new layer is built beside the current one and the store's metadata is switched to it in
+        one update, so readers see either all the old points or all the new ones. The old layer is
+        kept and listed in the store's ``layers`` with the time it was replaced.
         """
         with _POI_LOCK:
-            meta = self.map_metadata(map_key)
-            pois = change(self.list_pois(map_key))
+            map_key, meta = self._ensure_points(map_key)
+            pois = change(self._list_in(map_key, meta))
             old = self._layer_name(meta)
             fresh = f"poi_{uuid.uuid4().hex[:8]}"
-            staged = {**meta, "poi_layer": fresh}
+            staged = {**meta, "poi_layer": fresh, "layers": list(_decode(meta.get("layers")) or []) + [{"layer": old, "replaced_at": time.time()}]}
             staged.pop("pois", None)
             self.add_pois_to_layer(map_key, staged, pois)
             if self._local(map_key):
                 with h5py.File(map_key, "a") as h5:
                     h5.attrs["metadata"] = json.dumps(staged)
-                    if old in h5:
-                        del h5[old]
             else:
-                node = self.client[map_key]
-                _replace_metadata(node, staged)
-                if old in node:
-                    _delete_node(node[old])
+                _replace_metadata(self.client[map_key], staged)
         return pois
 
     def add_pois_to_layer(self, map_key: str, meta: dict, pois: list[dict]) -> None:

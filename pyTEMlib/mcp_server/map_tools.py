@@ -18,10 +18,14 @@ between the two tiles (``max_drift_m_per_s``), and a drift over time is fitted
 with the tile positions (``mosaic.register_tiles``). The map's metadata
 records the fitted drift, the residuals of the matches used and the tiles
 that fell back to their stage position.
+
+Nothing is deleted: every stitch is a new map version (``list_maps``), and a
+run's points of interest are kept once for all its versions (see ``map_store``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -36,6 +40,7 @@ from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as MCPImage
 
+from pyTEMlib.version import __version__
 from pyTEMlib.image_tools.mosaic import assemble, level_shapes, pyramid_levels, register_tiles, stage_canvas_shape
 from pyTEMlib.scoring import available_scorers, score_windows
 
@@ -92,6 +97,16 @@ def eds_pois(run, placement) -> list[dict]:
         x, y = placement.pixel_to_stage(centres[k, 0], centres[k, 1])
         out.append({"id": f"{run_name}:eds:{int(index)}", "x_m": float(x), "y_m": float(y), "kind": "eds_point", "source": "run", "score": None, "scorer_version": None, "reason": f"EDS point spectrum of tile {int(index)}", "links": [key]})
     return out
+
+
+def inputs_sha256(plan: dict, info, stage_sigma_m: float) -> str:
+    """A hash of what a stitch was made from: the run, which of its tiles were used, the settings and this pyTEMlib.
+
+    Two map versions with the same hash were stitched from the same inputs the same way."""
+    settings = {k: plan.get(k) for k in ("run", "refine", "box_m", "max_drift_m_per_s", "drift_knot_s")}
+    digest = hashlib.sha256(json.dumps({**settings, "stage_sigma_m": float(stage_sigma_m), "pytemlib": __version__}, sort_keys=True).encode())
+    digest.update(np.ascontiguousarray(np.asarray(info.index, dtype=np.int64)).tobytes())
+    return digest.hexdigest()
 
 
 def stitch_quality(placement) -> dict:
@@ -178,11 +193,10 @@ class MapTools:
         )
         progress(int(0.7 * PROGRESS_STEPS), PROGRESS_STEPS)
         self._check_canvas(placement.canvas_shape)  # refinement can grow the canvas by a few pixels
-        pois = self.store.existing_pois(plan["run"])
-        if plan.get("eds_pois"):
-            # Every EDS point spectrum of the run, at its tile's stitched centre, linked to its key;
-            # the previous stitch's EDS points are replaced, not repeated.
-            pois = [p for p in pois if not (p.get("kind") == "eds_point" and p.get("source") == "run")] + eds_pois(run, placement)
+        # Every EDS point spectrum of the run, at its tile's stitched centre, linked to its key; the run's
+        # EDS points from an earlier stitch are replaced, not repeated. Every other point stays with the run.
+        eds = eds_pois(run, placement) if plan.get("eds_pois") else None
+        previous = self.store.current_map(plan["run"])
         levels = pyramid_levels(placement.canvas_shape)
         writer = self.store.map_writer(plan["run"])
         try:
@@ -202,16 +216,20 @@ class MapTools:
             "stitched_at": time.time(),
             "refined": refine,
             "stage_sigma_m": float(sigma),
+            "inputs_sha256": inputs_sha256(plan, info, float(sigma)),
+            "pytemlib_version": __version__,
             **quality,
         }
         if len(run.tiles) <= 10_000:  # per-tile positions are kept for small maps; large ones keep the summary only
             metadata["tile_positions_px"] = placement.positions_px.round(3).tolist()
-        progress(int(0.99 * PROGRESS_STEPS), PROGRESS_STEPS)  # last chance to abort before the old map is replaced
-        key = self.store.write_map(plan["run"], writer, metadata, pois)
+        progress(int(0.99 * PROGRESS_STEPS), PROGRESS_STEPS)  # last chance to abort before the new version is stored
+        key = self.store.write_map(plan["run"], writer, metadata, eds_points=eds, previous=previous)
         progress(PROGRESS_STEPS, PROGRESS_STEPS)
         summary = {"tiles": len(run.tiles), "levels": levels, "canvas_shape": list(placement.canvas_shape), **quality}
-        if plan.get("eds_pois"):
-            summary["eds_pois"] = sum(1 for p in pois if p.get("kind") == "eds_point" and p.get("source") == "run")
+        if previous:
+            summary["previous_map"] = previous
+        if eds is not None:
+            summary["eds_pois"] = len(eds)
         return {"result_keys": {"map": key}, "summary": summary}
 
     def _check_score(self, plan: dict) -> dict:
@@ -267,12 +285,21 @@ class MapTools:
         h, w = meta["canvas_shape"]
         x_min, y_min = pixel_to_stage(meta, -0.5, -0.5)
         x_max, y_max = pixel_to_stage(meta, h - 0.5, w - 0.5)
-        return {
+        info = {
             "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
             "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
             "points_of_interest": self.store.poi_count(map_key),
             "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "drift") if k in meta},
+            "id": meta.get("id"), "stitched_at": meta.get("stitched_at"), "inputs_sha256": meta.get("inputs_sha256"),
         }
+        if meta.get("run"):
+            try:
+                versions = self.store.list_maps(meta["run"])
+            except Exception:  # the run is gone or unreadable: the map itself is still described
+                versions = []
+            if versions:
+                info["versions"] = {"count": len(versions), "newest": versions[0]["map"], "this_is_newest": versions[0]["map"] == map_key}
+        return info
 
     def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
         """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
@@ -311,7 +338,8 @@ class MapTools:
             max_drift_m_per_s: float = 0.0,
             eds_pois: bool = True,
         ) -> dict[str, Any]:
-            """Stitch a map run into a zoomable multi-resolution map, in the background.
+            """Stitch a map run into a zoomable multi-resolution map, in the background. Each call makes a new map
+            version; earlier versions and the run's points of interest are kept.
 
             run: the run's Tiled key or file path (Mapper results -> result_keys.run or run_file).
             refine: refine stage positions by matching overlaps (turn off for blank samples).
@@ -380,6 +408,14 @@ class MapTools:
 
             Given a Mapper run instead, the refusal names the run's stitched map."""
             return tools.map_info(map)
+
+        @mcp.tool()
+        def list_maps(run: str, limit: int = 20) -> dict[str, Any]:
+            """Every stitched version of a run's map, newest first (each assemble_map makes a new one; none is deleted).
+
+            Returns {"total", "maps": [{"map", "id", "stitched_at", "inputs_sha256", "tiles"}, at most ``limit``]}."""
+            maps = tools.store.list_maps(run)
+            return {"total": len(maps), "maps": maps[: max(0, int(limit))]}
 
         @mcp.tool()
         def get_region(map: str, box_m: list[float], level: int | None = None) -> ToolResult:
