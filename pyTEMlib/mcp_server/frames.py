@@ -85,8 +85,12 @@ def frame_of(store, key: str) -> dict[str, Any]:
     if shift is not None and not all(math.isfinite(v) for v in shift[:2]):
         raise FrameError(f"{key} records an image shift that is not a number ({shift})")
     centre = [stage[0] + shift[0], stage[1] + shift[1]] if shift else stage[:2]
+    try:
+        current = float(m["beam_current_pa"]) if "beam_current_pa" in m else None
+    except (TypeError, ValueError):
+        current = None
     return {"kind": "image", "centre_xy_m": centre, "pixel_size_m": float(pixel), "shape": shape, "sample": store.sample_of(key),
-            "shift_recorded": shift is not None}
+            "shift_recorded": shift is not None, "beam_current_pa": current}
 
 
 def stage_of(frame: dict, row: float, col: float) -> tuple[float, float]:
@@ -192,7 +196,9 @@ def register(mcp, store) -> None:
             # valid while the scan is as it was for this image.
             f["place_beam"] = {"position": [round((f["col"] + 0.5) / cols, 4), round((f["row"] + 0.5) / rows, 4)]}
         note = {} if frame["shift_recorded"] else {"note": "this image does not record its image shift, so x_m, y_m assume it had none"}
-        if not features and n > 0:
+        if not features and n > 0 and frame.get("beam_current_pa") == 0:
+            note["hint"] = "this image was taken with the beam blanked (beam_current_pa 0), so it shows only noise: unblank_beam and take it again"
+        elif not features and n > 0:
             # A small agent at a 20 nm field searched for particles over and over: say why nothing was found and what would find it.
             fov = frame["pixel_size_m"] * max(frame["shape"])
             note["hint"] = (f"nothing distinct in this {fov:.3g} m wide image. A feature wider than about a third of the field fills it "

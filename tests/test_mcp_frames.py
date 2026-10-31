@@ -164,3 +164,15 @@ def test_a_recorded_image_shift_moves_the_image_centre():
     assert not frame_of(store_with(IMAGE), "img.h5")["shift_recorded"]
     with pytest.raises(FrameError, match="image shift"):
         frame_of(store_with({**IMAGE, "image_shift_m": "[NaN, 0.0]"}), "img.h5")
+
+
+
+def test_find_features_on_an_image_taken_with_the_beam_blanked_says_so():
+    noise = np.random.default_rng(0).poisson(5, (128, 128)).astype(np.uint16)
+    node = Node({**IMAGE, "beam_current_pa": 0.0}, shape=noise.shape)
+    node.read = lambda: noise
+    store = Store({"dark.h5": Node(children={"image": Node(children={"HAADF": node})})}, sample={"sample_load_id": "L1"})
+    tools = {}
+    register(type("M", (), {"tool": lambda self: (lambda f: tools.setdefault(f.__name__, f))})(), store)
+    reply = tools["find_features"]("dark.h5", n=3)
+    assert reply["features"] == [] and "beam blanked" in reply["hint"]
