@@ -469,7 +469,8 @@ class MapTools:
         def list_pois(map: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
-            kind: only these kinds (e.g. "eds_point" or "candidate,revisit"); leave it out for every kind.
+            kind: leave it out to list every point (the usual call). Give it only when the user asks for one kind:
+            "candidate" (regions a scorer ranked), "eds_point", "revisit", "note", or several joined by commas.
             box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read); leave it out for all.
             Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape; when a filter
             matches nothing, "total_on_map" says how many points the map has.
