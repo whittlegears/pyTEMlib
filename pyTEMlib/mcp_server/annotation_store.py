@@ -287,7 +287,8 @@ def register(mcp, store: AnnotationStore, dataset_key: Callable[[str], str | Non
     def annotate(dataset: str, shape: Literal["pin", "circle", "box", "range"], coords: dict[str, float],
                  frame: Literal["stage_m", "pixel", "energy_ev"] = "stage_m", note: str = "",
                  kind: str = "note", links: list[str] | None = None, reported_by: str | None = None) -> dict[str, Any]:
-        """Put a note on a dataset (a map, an image or a spectrum) that people and agents both see.
+        """Put a note on a dataset (a map, an image or a spectrum) that people and agents both see. Only when the user
+        asks to mark, note or label something: listing, describing or reading data needs no note.
 
         coords: pin {x, y}, circle {x, y, r}, box {x0, y0, x1, y1}, or range {start, end} on a spectrum.
         frame: metres for maps, pixels for images, or electronvolts (only for a range).
