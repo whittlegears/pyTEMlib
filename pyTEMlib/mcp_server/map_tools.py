@@ -319,10 +319,14 @@ class MapTools:
 
     def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
         """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
-        except that a kind matching nothing also names the kinds the map has (``kinds_on_map``)."""
+        except that a filter matching nothing also gives how many points the map has (``total_on_map``) and, for a
+        kind, the kinds it has (``kinds_on_map``). A box with no area ([0, 0, 0, 0]) is no box."""
         limit = max(0, int(limit))
         # Models ask for kind="all" or list several kinds in one string; a filter that matches nothing reads as "no points".
         kinds = {k for k in re.split(r"[\s,;|]+", kind or "") if k} - {"all", "any", "*"}
+        # Models fill an optional box with zeros: a box with no area holds no point, so it means "no box".
+        if box_m is not None and not (len(box_m) == 4 and box_m[1] > box_m[0] and box_m[3] > box_m[2]):
+            box_m = None
         if box_m is None and not kinds:
             return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
         if not kinds:
@@ -330,8 +334,10 @@ class MapTools:
         else:  # one read per kind, so a highlight kind never reads the map's spatial cells
             pois = [p for k in sorted(kinds) for p in self.store.list_pois(map_key, kind=k, box_m=box_m)]
         out = {"total": len(pois), "pois": pois[:limit]}
-        if not pois and kinds and box_m is None:
-            out["kinds_on_map"] = self.store.poi_kinds(map_key)
+        if not pois:  # a filter that matches nothing must not read as an empty map
+            out["total_on_map"] = self.store.poi_count(map_key)
+            if kinds and box_m is None:
+                out["kinds_on_map"] = self.store.poi_kinds(map_key)
         return out
 
     # -------------------------------------------------------------- tools
@@ -464,8 +470,9 @@ class MapTools:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
             kind: only these kinds (e.g. "eds_point" or "candidate,revisit"); leave it out for every kind.
-            box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read).
-            Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape.
+            box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read); leave it out for all.
+            Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape; when a filter
+            matches nothing, "total_on_map" says how many points the map has.
             """
             return tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
 

@@ -382,7 +382,10 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
     assert call(c, "list_pois", map=map_key, kind="all")["total"] == 5  # what small models ask for
     assert call(c, "list_pois", map=map_key, kind="eds_point, note, revisit")["total"] == 5
     missing = call(c, "list_pois", map=map_key, kind="poi")
-    assert missing["total"] == 0 and missing["kinds_on_map"] == ["eds_point", "note"]
+    assert missing["total"] == 0 and missing["kinds_on_map"] == ["eds_point", "note"] and missing["total_on_map"] == 5
+    assert call(c, "list_pois", map=map_key, box_m=[0, 0, 0, 0])["total"] == 5  # a small model's "no box"
+    outside = call(c, "list_pois", map=map_key, box_m=[x1 + 1e-6, x1 + 2e-6, y0, y1])
+    assert outside["total"] == 0 and outside["total_on_map"] == 5
 
 
 def test_every_tool_call_is_traced_with_its_arguments_and_outcome(tmp_path, run_file):
