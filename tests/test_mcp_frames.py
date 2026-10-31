@@ -2,7 +2,9 @@
 
 import pytest
 
-from pyTEMlib.mcp_server.frames import FrameError, frame_of, pixel_of, register, stage_of
+import numpy as np
+
+from pyTEMlib.mcp_server.frames import FrameError, features_in, frame_of, pixel_of, register, stage_of
 
 
 class Node:
@@ -112,3 +114,47 @@ def test_the_sample_of_an_array_inside_a_file_is_read_from_the_file():
     store.client = {"run.h5": Meta({"sample_id": "g", "sample_load_id": "L1"}), "run.h5/image": Meta({}), "run.h5/image/HAADF": Meta({"pixel_size_m": 1e-9})}
     assert store.sample_of("run.h5/image/HAADF") == {"sample_id": "g", "sample_load_id": "L1"}
     assert store.sample_of("other") == {}
+
+
+def _particles(shape=(256, 256), spots=((60, 80, 6.0, 40.0), (180, 150, 4.0, 25.0), (128, 230, 5.0, 2.0)), seed=1):
+    """Gaussian particles (row, col, sigma px, height) on noise of standard deviation 1."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    image = 10.0 + rng.normal(0.0, 1.0, shape)
+    for row, col, sigma, height in spots:
+        image += height * np.exp(-((yy - row) ** 2 + (xx - col) ** 2) / (2 * sigma**2))
+    return image
+
+
+def test_features_are_the_distinct_blobs_strongest_first():
+    found = features_in(_particles(), 1e-9, n=5)
+    assert [(round(f["row"]), round(f["col"])) for f in found[:2]] == [(60, 80), (180, 150)]
+    assert found[0]["contrast"] > found[1]["contrast"] >= 3.0
+    assert 8e-9 < found[0]["diameter_m"] < 3e-8
+    assert all(not (abs(f["row"] - 128) < 5 and abs(f["col"] - 230) < 5) for f in found)  # 2 x the noise: not distinct
+    assert features_in(_particles(spots=()), 1e-9) == []
+    assert len(features_in(_particles(), 1e-9, n=1)) == 1
+
+
+def test_find_features_gives_stage_positions_of_an_image_and_refuses_a_map():
+    image = _particles()
+    meta = {**IMAGE}
+    node = Node(meta, shape=image.shape)
+    node.read = lambda: image
+    store = Store({"img.h5": Node(children={"image": Node(children={"HAADF": node})})}, sample={"sample_load_id": "L1"})
+    tools = {}
+    register(type("M", (), {"tool": lambda self: (lambda f: tools.setdefault(f.__name__, f))})(), store)
+    reply = tools["find_features"]("img.h5", n=2)
+    first = reply["features"][0]
+    assert (first["x_m"], first["y_m"]) == pytest.approx(stage_of(frame_of(store, "img.h5"), first["row"], first["col"]))
+    assert reply["sample_load_id"] == "L1" and "image shift" in reply["note"]
+    assert tools["find_features"]("nope.h5")["error"]["code"] == "unknown_dataset"
+
+
+def test_a_recorded_image_shift_moves_the_image_centre():
+    shifted = store_with({**IMAGE, "image_shift_m": "[3e-8, -4e-8]"})
+    frame = frame_of(shifted, "img.h5")
+    assert frame["centre_xy_m"] == pytest.approx([1e-6 + 3e-8, -2e-6 - 4e-8]) and frame["shift_recorded"]
+    assert not frame_of(store_with(IMAGE), "img.h5")["shift_recorded"]
+    with pytest.raises(FrameError, match="image shift"):
+        frame_of(store_with({**IMAGE, "image_shift_m": "[NaN, 0.0]"}), "img.h5")
