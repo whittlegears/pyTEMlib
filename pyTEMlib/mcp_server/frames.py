@@ -118,11 +118,14 @@ def features_in(image: np.ndarray, pixel_m: float, n: int = 5, min_size_m: float
 
     image = np.asarray(image, dtype=np.float64)
     rows, cols = image.shape
+    widest = min(rows, cols) / BLOB_DIAMETER_PER_SIGMA  # a feature wholly inside the image is no wider than it
+    if n <= 0 or (min_size_m or 0.0) / pixel_m / BLOB_DIAMETER_PER_SIGMA > widest:
+        return []  # asked for none, or for features wider than the image (searching would only allocate gigabytes)
     background = float(np.median(image))
     noise = float(np.median(np.abs(image - background))) * 1.4826 or float(image.std()) or 1.0
     scaled = np.clip((image - background) / noise, 0.0, None)
     smallest = max(1.0, (min_size_m or 3.0 * pixel_m) / pixel_m / BLOB_DIAMETER_PER_SIGMA)
-    largest = max(smallest, (max_size_m or min(rows, cols) * pixel_m / 8.0) / pixel_m / BLOB_DIAMETER_PER_SIGMA)
+    largest = min(widest, max(smallest, (max_size_m or min(rows, cols) * pixel_m / 8.0) / pixel_m / BLOB_DIAMETER_PER_SIGMA))
     found = []
     for row, col, sigma in blob_log(scaled, min_sigma=smallest, max_sigma=largest, num_sigma=8, threshold=None, threshold_rel=0.05):
         radius = sigma * BLOB_DIAMETER_PER_SIGMA / 2.0
@@ -183,6 +186,12 @@ def register(mcp, store) -> None:
         for f in features:
             f["x_m"], f["y_m"] = stage_of(frame, f["row"], f["col"])
         note = {} if frame["shift_recorded"] else {"note": "this image does not record its image shift, so x_m, y_m assume it had none"}
+        if not features and n > 0:
+            # A small agent at a 20 nm field searched for particles over and over: say why nothing was found and what would find it.
+            fov = frame["pixel_size_m"] * max(frame["shape"])
+            note["hint"] = (f"nothing distinct in this {fov:.3g} m wide image. A feature wider than about a third of the field fills it "
+                            "and cannot be told apart: to find particles, take an image whose field of view is several times their "
+                            "size (200 to 600 nm for nanoparticles). Bare support or noise also shows nothing.")
         return {"features": features, "pixel_size_m": frame["pixel_size_m"], "shape": frame["shape"], **frame["sample"], **note}
 
     @mcp.tool()

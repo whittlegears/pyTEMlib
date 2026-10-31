@@ -149,6 +149,10 @@ def test_find_features_gives_stage_positions_of_an_image_and_refuses_a_map():
     assert (first["x_m"], first["y_m"]) == pytest.approx(stage_of(frame_of(store, "img.h5"), first["row"], first["col"]))
     assert reply["sample_load_id"] == "L1" and "image shift" in reply["note"]
     assert tools["find_features"]("nope.h5")["error"]["code"] == "unknown_dataset"
+    assert "hint" not in reply
+    empty = tools["find_features"]("img.h5", n=2, min_size_m=1.0, max_size_m=2.0)  # nothing a metre across
+    assert empty["features"] == [] and "several times their size" in empty["hint"]
+    assert "hint" not in tools["find_features"]("img.h5", n=0)  # a caller asking only for the frame
 
 
 def test_a_recorded_image_shift_moves_the_image_centre():
