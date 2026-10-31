@@ -172,7 +172,7 @@ def register(mcp, store) -> None:
         """The most distinct bright features (particles, clusters; atom columns at atomic scale) of a single image,
         strongest first, each with its pixel (row, col), stage position (x_m, y_m), diameter_m and contrast (times the
         noise). Use it to choose where to aim a finer image or a spectrum: aim at x_m, y_m, or, for a spectrum while
-        the scan is as it was for this image, pass the feature's beam_xy to place_beam as it is.
+        the scan is as it was for this image, call place_beam with the feature's place_beam arguments as they are.
         n: how many (default 5). min_size_m, max_size_m: the feature sizes to look for (default 3 pixels to 1/8 of the
         image). No features: the image shows nothing distinct (bare support, or noise)."""
         try:
@@ -187,9 +187,10 @@ def register(mcp, store) -> None:
         rows, cols = (int(v) for v in frame["shape"][:2])
         for f in features:
             f["x_m"], f["y_m"] = stage_of(frame, f["row"], f["col"])
-            # place_beam's [x, y]: fractions of the scan from its top-left corner, so a feature can be measured without
-            # arithmetic (a small agent placed the beam at the image centre instead); valid while the scan is unchanged.
-            f["beam_xy"] = [round((f["col"] + 0.5) / cols, 4), round((f["row"] + 0.5) / rows, 4)]
+            # place_beam's arguments, whole: [x, y] as fractions of the scan from its top-left corner, so a feature can be
+            # measured without arithmetic or retyping (a small agent placed the beam at the centre, then wrote x twice);
+            # valid while the scan is as it was for this image.
+            f["place_beam"] = {"position": [round((f["col"] + 0.5) / cols, 4), round((f["row"] + 0.5) / rows, 4)]}
         note = {} if frame["shift_recorded"] else {"note": "this image does not record its image shift, so x_m, y_m assume it had none"}
         if not features and n > 0:
             # A small agent at a 20 nm field searched for particles over and over: say why nothing was found and what would find it.
