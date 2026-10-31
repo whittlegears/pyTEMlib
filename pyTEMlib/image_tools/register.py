@@ -9,7 +9,7 @@ probe, and searched for in the parent around where it was predicted, by normalis
 sub-pixel peak.
 
 A placement is accepted only when it is clearly the best one: its score passes ``min_score`` and no other
-peak in the search window (further than a few parent pixels away) reaches ``max_ambiguity`` of it. Otherwise
+peak in or just beyond the search window (further than a few parent pixels away) reaches ``max_ambiguity`` of it. Otherwise
 the result says "unplaced", with the reason: a wrong placement is worse than none, because everything placed
 on top of the child would be wrong with it.
 
@@ -125,9 +125,12 @@ def register_child(
     parent = np.asarray(parent, dtype=np.float64)
     half = (np.array(template.shape) - 1) / 2.0
     predicted = np.asarray(predicted_px, dtype=np.float64)
-    # The part of the parent where the template's top-left can fall when its centre is within the window.
-    lo = np.floor(predicted - half - window_px).astype(int)
-    hi = np.ceil(predicted - half + window_px).astype(int) + np.array(template.shape)
+    # The part of the parent where the template's top-left can fall when its centre is within the window, and as far
+    # again as a rival must be from the best: a rival just outside the window still makes the match a guess.
+    exclude = int(np.ceil(AMBIGUITY_EXCLUDE_PX + 3.0 * smooth_px))  # the smoothed peak's own shoulders are not rivals
+    reach = window_px + exclude
+    lo = np.floor(predicted - half - reach).astype(int)
+    hi = np.ceil(predicted - half + reach).astype(int) + np.array(template.shape)
     lo_c, hi_c = np.maximum(lo, 0), np.minimum(hi, parent.shape)
     region = parent[lo_c[0] : hi_c[0], lo_c[1] : hi_c[1]]
     if region.shape[0] < template.shape[0] + 2 or region.shape[1] < template.shape[1] + 2:
@@ -140,10 +143,15 @@ def register_child(
         region = ndimage.gaussian_filter(region, smooth_px)
         template = ndimage.gaussian_filter(template, smooth_px)
     scores = match_template(region, template)
-    peak = np.array(np.unravel_index(int(np.argmax(scores)), scores.shape))
+    rows, cols = np.indices(scores.shape)
+    inside = (np.abs(lo_c[0] + rows + half[0] - predicted[0]) <= window_px) & (np.abs(lo_c[1] + cols + half[1] - predicted[1]) <= window_px)
+    if not inside.any():
+        record.reason = "the search window falls outside the parent image"
+        return record
+    peak = np.array(np.unravel_index(int(np.argmax(np.where(inside, scores, -np.inf))), scores.shape))
     best = float(scores[tuple(peak)])
+    climbing = scores[max(0, peak[0] - 1) : peak[0] + 2, max(0, peak[1] - 1) : peak[1] + 2].max() > best
     others = scores.copy()
-    exclude = int(np.ceil(AMBIGUITY_EXCLUDE_PX + 3.0 * smooth_px))  # the smoothed peak's own shoulders are not rivals
     r0, c0 = np.maximum(peak - exclude, 0)
     others[r0 : peak[0] + exclude + 1, c0 : peak[1] + exclude + 1] = -np.inf
     rival = float(others.max()) if np.isfinite(others).any() else -np.inf
@@ -154,7 +162,7 @@ def register_child(
     offset, sharpness = _subpixel(fine, fine_peak)
     peak = fine_peak
     centre = lo_c + peak + offset + half
-    if peak[0] in (0, scores.shape[0] - 1) or peak[1] in (0, scores.shape[1] - 1):
+    if climbing or peak[0] in (0, scores.shape[0] - 1) or peak[1] in (0, scores.shape[1] - 1):
         record.reason = "the best match is on the edge of the search window: the child may lie outside it"
         return record
     if np.hypot(*(centre - predicted)) > window_px * np.sqrt(2.0) + 1.0:

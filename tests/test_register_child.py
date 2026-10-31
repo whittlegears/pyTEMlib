@@ -52,6 +52,15 @@ def test_a_child_on_a_repeating_pattern_is_a_guess_and_is_unplaced():
     assert placed.status == "unplaced" and "almost as well" in placed.reason
 
 
+def test_a_repeat_just_outside_a_narrow_window_still_makes_the_match_a_guess():
+    rows, cols = np.mgrid[0:2400, 0:2400]
+    lattice = np.cos(2 * np.pi * rows / 48.0) + np.cos(2 * np.pi * cols / 48.0)  # a repeat of 6 parent pixels
+    parent = parent_of(lattice)
+    child = lattice[872:1128, 872:1128]
+    placed = register_child(child, 1.0, parent, float(STEP), predicted_px=(125, 125), window_px=4)
+    assert placed.status == "unplaced" and "almost as well" in placed.reason
+
+
 def test_a_child_outside_the_search_window_is_not_matched_to_something_else():
     scene = fine_scene()
     parent = parent_of(scene)
