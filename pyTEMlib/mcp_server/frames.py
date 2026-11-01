@@ -161,14 +161,20 @@ def register(mcp, store) -> None:
             return {"error": {"code": "unknown_dataset", "message": f"no map or image {dataset!r}"}}
         except FrameError as exc:
             return {"error": {"code": "no_frame", "message": str(exc)}}
-        x, y = stage_of(frame, row, col)
         rows, cols = frame["shape"]
-        notes = ["this image does not record its image shift, so it is placed as if it had none"] if frame["kind"] == "image" and not frame["shift_recorded"] else []
+        if not (-0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5):
+            # A small agent passed a point of interest's nanometres (x = -5.9, y = 379.4) as row and col.
+            return {"error": {"code": "outside", "message": (
+                f"pixel ({row:g}, {col:g}) is outside this {rows} x {cols} pixel {frame['kind']}: row and col are pixels, "
+                f"0 to {rows - 1} and 0 to {cols - 1}. A position given in nanometres or metres is already a stage "
+                "position (metres = nm x 1e-9): use it as it is, without to_stage.")}}
+        x, y = stage_of(frame, row, col)
+        notes =["this image does not record its image shift, so it is placed as if it had none"] if frame["kind"] == "image" and not frame["shift_recorded"] else []
         notes.append(
             "before moving there, check the instrument's get_sample gives this sample_load_id: another load puts the sample elsewhere"
             if frame["sample"].get("sample_load_id") else "this dataset does not record which sample load it was taken on"
         )
-        return {"x_m": x, "y_m": y, "inside": -0.5 <= row <= rows - 0.5 and -0.5 <= col <= cols - 0.5, "kind": frame["kind"],
+        return {"x_m": x, "y_m": y, "inside": True, "kind": frame["kind"],
                 **frame["sample"], "note": "; ".join(notes)}
 
     @mcp.tool()

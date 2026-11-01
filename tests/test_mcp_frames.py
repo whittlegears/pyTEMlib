@@ -174,3 +174,15 @@ def test_find_features_on_an_image_taken_with_the_beam_blanked_says_so():
     register(type("M", (), {"tool": lambda self: (lambda f: tools.setdefault(f.__name__, f))})(), store)
     reply = tools["find_features"]("dark.h5", n=3)
     assert reply["features"] == [] and "beam blanked" in reply["hint"]
+
+
+def test_to_stage_refuses_a_pixel_outside_the_image_and_says_nanometres_are_already_a_stage_position():
+    import asyncio
+
+    from fastmcp import FastMCP
+
+    mcp = FastMCP("t")
+    register(mcp, Store({"img.h5": Node(children={"image": Node(children={"HAADF": Node(IMAGE, shape=(101, 201))})})}))
+    reply = asyncio.run(mcp.call_tool("to_stage", {"dataset": "img.h5", "row": -5.9, "col": 379.4})).structured_content
+    assert reply["error"]["code"] == "outside" and "0 to 100 and 0 to 200" in reply["error"]["message"]
+    assert "metres = nm x 1e-9" in reply["error"]["message"]
