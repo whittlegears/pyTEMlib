@@ -386,6 +386,13 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
     assert call(c, "list_pois", map=map_key, box_m=[0, 0, 0, 0])["total"] == 5  # a small model's "no box"
     outside = call(c, "list_pois", map=map_key, box_m=[x1 + 1e-6, x1 + 2e-6, y0, y1])
     assert outside["total"] == 0 and outside["total_on_map"] == 5
+    # A box shrunk to one point, with a kind the map does not have (qwen3:8b asked this three times over): nearest first.
+    second = x0 + 2 * (x1 - x0) / 7
+    near = call(c, "list_pois", map=map_key, box_m=[second, second, (y0 + y1) / 2, (y0 + y1) / 2], kind="revisit")
+    assert near["pois"][0]["x_m"] == pytest.approx(second) and near["pois"][0]["distance_m"] == pytest.approx(0.0, abs=1e-12)
+    assert near["total"] == 5 and near["kinds_on_map"] == ["eds_point", "note"] and "nearest" in near["hint"]
+    notes = call(c, "list_pois", map=map_key, box_m=[x0, x0, y0, y0], kind="note")
+    assert {p["kind"] for p in notes["pois"]} == {"note"} and "kinds_on_map" not in notes
 
 
 def test_every_tool_call_is_traced_with_its_arguments_and_outcome(tmp_path, run_file):

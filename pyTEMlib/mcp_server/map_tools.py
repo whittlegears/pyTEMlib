@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import re
 from pathlib import Path
 import time
@@ -320,13 +321,21 @@ class MapTools:
     def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
         """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
         except that a filter matching nothing also gives how many points the map has (``total_on_map``) and, for a
-        kind, the kinds it has (``kinds_on_map``). A box with no area ([0, 0, 0, 0]) is no box."""
+        kind, the kinds it has (``kinds_on_map``). A box with no area ([0, 0, 0, 0]) is no box; one shrunk to a point
+        ([x, x, y, y]) lists the points nearest it, closest first, each with ``distance_m`` (of any kind when none of
+        the asked kinds is on the map)."""
         limit = max(0, int(limit))
         # Models ask for kind="all" or list several kinds in one string; a filter that matches nothing reads as "no points".
         kinds = {k for k in re.split(r"[\s,;|]+", kind or "") if k} - {"all", "any", "*"}
-        # Models fill an optional box with zeros: a box with no area holds no point, so it means "no box".
+        # Models fill an optional box with zeros: a box with no area holds no point, so it means "no box". A box
+        # shrunk to one point is a model looking for the point there (it asked for [x, x, y, y] three times over).
+        point = None
         if box_m is not None and not (len(box_m) == 4 and box_m[1] > box_m[0] and box_m[3] > box_m[2]):
+            if len(box_m) == 4 and box_m[0] == box_m[1] and box_m[2] == box_m[3] and any(box_m):
+                point = (float(box_m[0]), float(box_m[2]))
             box_m = None
+        if point is not None:
+            return self._nearest(map_key, point, kinds, limit)
         if box_m is None and not kinds:
             return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
         if not kinds:
@@ -338,6 +347,21 @@ class MapTools:
             out["total_on_map"] = self.store.poi_count(map_key)
             if kinds and box_m is None:
                 out["kinds_on_map"] = self.store.poi_kinds(map_key)
+        return out
+
+    def _nearest(self, map_key: str, point: tuple[float, float], kinds: set[str], limit: int) -> dict[str, Any]:
+        """The points nearest ``point``, closest first, of the asked kinds (of any kind when the map has none of them)."""
+        x, y = point
+        pois = [p for k in sorted(kinds) for p in self.store.list_pois(map_key, kind=k)] if kinds else []
+        out: dict[str, Any] = {}
+        if not pois:
+            if kinds:
+                out["kinds_on_map"] = self.store.poi_kinds(map_key)
+            pois = self.store.list_pois(map_key)
+        near = sorted(({**p, "distance_m": math.hypot(p["x_m"] - x, p["y_m"] - y)} for p in pois), key=lambda p: p["distance_m"])
+        out = {"total": len(near), "pois": near[:limit], **out}
+        out["hint"] = (f"points nearest ({x:.4g}, {y:.4g}) m first: the first is the point there; use its x_m and y_m as they are"
+                       if near else "this map has no points of interest")
         return out
 
     # -------------------------------------------------------------- tools
