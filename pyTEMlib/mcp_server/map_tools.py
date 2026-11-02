@@ -499,7 +499,14 @@ class MapTools:
             Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape; when a filter
             matches nothing, "total_on_map" says how many points the map has.
             """
-            return tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
+            listed = tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
+            # A small model's context is 8k tokens: 19 points with 17-digit floats, empty links and scorer versions
+            # took a quarter of it. Positions are given to 0.01 nm and scores to 0.01; the store keeps them exact.
+            listed["pois"] = [{**{k: v for k, v in poi.items() if k != "scorer_version" and not (k == "links" and not v)},
+                               **{k: round(poi[k], 11) for k in ("x_m", "y_m", "distance_m") if isinstance(poi.get(k), float)},
+                               **({"score": round(poi["score"], 2)} if isinstance(poi.get("score"), float) else {})}
+                              for poi in listed["pois"]]
+            return listed
 
         @mcp.tool()
         def add_poi(map: str, x_m: float, y_m: float, kind: str = "note", reason: str = "", links: list[str] | None = None, id: str | None = None) -> dict[str, Any]:

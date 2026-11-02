@@ -375,7 +375,12 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
         call(c, "add_poi", map=map_key, x_m=x0 + (k + 1) * (x1 - x0) / 7, y_m=(y0 + y1) / 2, kind="note" if k % 2 else "eds_point")
     for args in ({}, {"kind": "note"}, {"box_m": [x0, (x0 + x1) / 2, y0, y1]}, {"kind": "eds_point", "limit": 1}):
         reply = call(c, "list_pois", map=map_key, **args)
-        assert set(reply) == {"total", "pois"} and reply == tools.list_pois(map_key, **args)
+        stored = tools.list_pois(map_key, **args)
+        assert set(reply) == {"total", "pois"} and reply["total"] == stored["total"]
+        assert [p["id"] for p in reply["pois"]] == [p["id"] for p in stored["pois"]]
+        # Positions are given to 0.01 nm (short numbers a model can copy); the store keeps them exact.
+        assert all(p["x_m"] == round(s["x_m"], 11) and abs(p["x_m"] - s["x_m"]) <= 5e-12 for p, s in zip(reply["pois"], stored["pois"]))
+        assert not any("scorer_version" in p or p.get("links") == [] for p in reply["pois"])  # nothing that only fills a small context
         assert len(reply["pois"]) == min(reply["total"], args.get("limit", 200))
     assert call(c, "list_pois", map=map_key)["total"] == 5
     assert call(c, "list_pois", map=map_key, kind="eds_point", limit=1)["total"] == 3
@@ -389,7 +394,7 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
     # A box shrunk to one point, with a kind the map does not have (qwen3:8b asked this three times over): nearest first.
     second = x0 + 2 * (x1 - x0) / 7
     near = call(c, "list_pois", map=map_key, box_m=[second, second, (y0 + y1) / 2, (y0 + y1) / 2], kind="revisit")
-    assert near["pois"][0]["x_m"] == pytest.approx(second) and near["pois"][0]["distance_m"] == pytest.approx(0.0, abs=1e-12)
+    assert near["pois"][0]["x_m"] == pytest.approx(second, abs=5e-12) and near["pois"][0]["distance_m"] == pytest.approx(0.0, abs=1e-12)
     assert near["total"] == 5 and near["kinds_on_map"] == ["eds_point", "note"] and "nearest" in near["hint"]
     notes = call(c, "list_pois", map=map_key, box_m=[x0, x0, y0, y0], kind="note")
     assert {p["kind"] for p in notes["pois"]} == {"note"} and "kinds_on_map" not in notes
