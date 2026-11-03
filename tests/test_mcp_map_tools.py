@@ -107,6 +107,8 @@ def test_stitch_view_score_and_annotate(client, run_file):
     assert len(added) == 3 and added[0]["score"] >= added[-1]["score"]
     assert all(x0 <= p["x_m"] <= x1 and y0 <= p["y_m"] <= y1 for p in added)
     assert added[0]["scorer_version"] == BaselineScorer.version
+    listed = {p["id"]: p for p in call(c, "list_pois", map=map_key)["pois"]}
+    assert all(listed[p["id"]]["scorer_version"] == BaselineScorer.version for p in added)  # a listed point still names its scorer
 
     poi = call(c, "add_poi", map=map_key, x_m=(x0 + x1) / 2, y_m=(y0 + y1) / 2, kind="eds_point", reason="spectrum here", links=["spectrum_001.h5"])
     assert poi["links"] == ["spectrum_001.h5"]
@@ -380,7 +382,7 @@ def test_list_pois_always_answers_total_and_pois(client, run_file):
         assert [p["id"] for p in reply["pois"]] == [p["id"] for p in stored["pois"]]
         # Positions are given to 0.01 nm (short numbers a model can copy); the store keeps them exact.
         assert all(p["x_m"] == round(s["x_m"], 11) and abs(p["x_m"] - s["x_m"]) <= 5e-12 for p, s in zip(reply["pois"], stored["pois"]))
-        assert not any("scorer_version" in p or p.get("links") == [] for p in reply["pois"])  # nothing that only fills a small context
+        assert not any(p.get("scorer_version", "") is None or p.get("links") == [] for p in reply["pois"])  # nothing that only fills a small context
         assert len(reply["pois"]) == min(reply["total"], args.get("limit", 200))
     assert call(c, "list_pois", map=map_key)["total"] == 5
     assert call(c, "list_pois", map=map_key, kind="eds_point", limit=1)["total"] == 3

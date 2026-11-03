@@ -500,9 +500,10 @@ class MapTools:
             matches nothing, "total_on_map" says how many points the map has.
             """
             listed = tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
-            # A small model's context is 8k tokens: 19 points with 17-digit floats, empty links and scorer versions
-            # took a quarter of it. Positions are given to 0.01 nm and scores to 0.01; the store keeps them exact.
-            listed["pois"] = [{**{k: v for k, v in poi.items() if k != "scorer_version" and not (k == "links" and not v)},
+            # A small model's context is 8k tokens: 19 points with 17-digit floats, empty links and empty scorer
+            # versions took a quarter of it. Positions are given to 0.01 nm and scores to 0.01; the store keeps them
+            # exact. A scored point keeps its scorer version, so a reader can tell which scorer found it.
+            listed["pois"] = [{**{k: v for k, v in poi.items() if not (k in ("links", "scorer_version") and not v)},
                                **{k: round(poi[k], 11) for k in ("x_m", "y_m", "distance_m") if isinstance(poi.get(k), float)},
                                **({"score": round(poi["score"], 2)} if isinstance(poi.get("score"), float) else {})}
                               for poi in listed["pois"]]
