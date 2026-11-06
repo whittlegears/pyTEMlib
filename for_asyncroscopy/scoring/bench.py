@@ -1,13 +1,12 @@
 """
 Command-line bench for field-of-view scorers.
 
-    python -m pyTEMlib.scoring.bench --scorer baseline
-    python -m pyTEMlib.scoring.bench --scorer random
-    python -m pyTEMlib.scoring.bench --scorer baseline_v2
-    python -m pyTEMlib.scoring.bench --scorer my_package.scorers:MyScorer --seeds 0 1 2 --out results.jsonl
+    python -m for_asyncroscopy.scoring.bench --scorer baseline
+    python -m for_asyncroscopy.scoring.bench --scorer random
+    python -m for_asyncroscopy.scoring.bench --scorer baseline_v2
+    python -m for_asyncroscopy.scoring.bench --scorer my_package.scorers:MyScorer --seeds 0 1 2 --out results.jsonl
 
-``--scorer`` takes a registered name (see ``pyTEMlib.scoring.available_scorers``;
-the reference ``random`` is always there) or ``module:attribute`` naming a
+``--scorer`` takes a name (``baseline``, ``baseline_v2`` or the reference ``random``) or ``module:attribute`` naming a
 scorer class or instance, so a new scorer can be benched before it is
 packaged. Prints the result as JSON; ``--out`` also appends it as one line to
 a JSONL file. The default seeds are the held-out ones (3-29); seeds 0-2 are
@@ -38,8 +37,8 @@ def load_scorer(spec: str):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m pyTEMlib.scoring.bench", description=__doc__.split("\n\n")[0].strip())
-    parser.add_argument("--scorer", default="baseline", help="registered name, 'random', or module:attribute")
+    parser = argparse.ArgumentParser(prog="python -m for_asyncroscopy.scoring.bench", description=__doc__.split("\n\n")[0].strip())
+    parser.add_argument("--scorer", default="baseline", help="baseline, baseline_v2, random, or module:attribute")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS))
     parser.add_argument("--k", type=int, default=DEFAULT_K)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)

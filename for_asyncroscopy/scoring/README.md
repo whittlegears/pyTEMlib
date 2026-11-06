@@ -23,7 +23,7 @@ gradient) is still selectable as `baseline_v2`, for comparison only.
 
 ## What the evaluation measures (and what it does not)
 
-`pyTEMlib.scoring.evaluate` scores a scorer against labelled maps: maps where
+`for_asyncroscopy.scoring.evaluate` scores a scorer against labelled maps: maps where
 the particle positions are known and some regions were deliberately spoiled.
 Each synthetic map (`synthetic-fov-2`) is a 10 x 10 grid of 96-pixel regions:
 
@@ -78,10 +78,10 @@ Note the 2.0.0 row: overall precision@5 alone looks fine because its top 5 are
 always well-separated particles; only the per-kind numbers show it ranking
 crowded, small and large particles below defocused and contaminated regions.
 On the earlier, single-kind set (`synthetic-fov-1`, seeds 0-2) 1.0.0 scored
-0.0 and 2.0.0 1.0; those records are kept in `benchmarks/results/reward_eval.jsonl`
-with the new ones.
+0.0 and 2.0.0 1.0; those records were in `benchmarks/results/reward_eval.jsonl`
+of pyTEMlib's feature/mcp-mapping branch.
 
-Probes from an independent review (`tests/test_reward_eval.py`), score of the
+Probes from an independent review (`test_reward_eval.py`), score of the
 sharp version / the same defocused by 4 px:
 
 | probe | 2.0.0 | 3.0.0 |
@@ -111,13 +111,13 @@ windows.
 ## Benchmark your own scorer
 
 ```
-python -m pyTEMlib.scoring.bench --scorer baseline
-python -m pyTEMlib.scoring.bench --scorer random
-python -m pyTEMlib.scoring.bench --scorer baseline_v2
-python -m pyTEMlib.scoring.bench --scorer my_scorers:BlobScorer --out benchmarks/results/reward_eval.jsonl
+python -m for_asyncroscopy.scoring.bench --scorer baseline
+python -m for_asyncroscopy.scoring.bench --scorer random
+python -m for_asyncroscopy.scoring.bench --scorer baseline_v2
+python -m for_asyncroscopy.scoring.bench --scorer my_scorers:BlobScorer --out reward_eval.jsonl
 ```
 
-`--scorer` takes a registered name or `module:attribute`. The bench prints
+`--scorer` takes `baseline`, `baseline_v2`, `random` or `module:attribute`. The bench prints
 JSON with `scorer_version`, the seeds, precision@5 overall and per kind, and
 the sensitivity, and exits 1 below the pass mark. An example scorer, `my_scorers.py`:
 
@@ -152,10 +152,5 @@ class BlobScorer:
         return min(sharp / 3, 1.0), f"{sharp} sharp blobs of {n}"
 ```
 
-To make it available to `score_map` and `list_scorers`, register it from
-your package:
-
-```toml
-[project.entry-points."pytemlib.scorers"]
-blobs = "my_scorers:BlobScorer"
-```
+`score_map` and `list_scorers` offer the scorers in the map tools' `SCORERS`;
+add an instance there to offer another.

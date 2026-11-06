@@ -57,7 +57,9 @@ from datetime import datetime, timezone
 import numpy as np
 from scipy import ndimage
 
-from . import Scorer, available_scorers
+from pyTEMlib.image_tools.image_scoring import BaselineScorer, Scorer
+
+from .baseline_v2 import BaselineScorerV2
 
 DATASET_VERSION = "synthetic-fov-2"
 TUNING_SEEDS = (0, 1, 2)
@@ -278,11 +280,9 @@ class RandomScorer:
 def resolve_scorer(scorer: str | Scorer) -> Scorer:
     if not isinstance(scorer, str):
         return scorer
-    if scorer == RandomScorer.name:
-        return RandomScorer()
-    scorers = available_scorers()
+    scorers = {s.name: s for s in (BaselineScorer(), BaselineScorerV2(), RandomScorer())}
     if scorer not in scorers:
-        raise ValueError(f"unknown scorer {scorer!r}; available: {sorted(scorers) + [RandomScorer.name]}")
+        raise ValueError(f"unknown scorer {scorer!r}; available: {sorted(scorers)}")
     return scorers[scorer]
 
 

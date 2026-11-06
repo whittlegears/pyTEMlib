@@ -25,6 +25,7 @@ from .image_graph import get_base_atoms
 from .image_distortion import get_distortion_matrix, undistort, undistort_sitk
 from .image_registration import complete_registration, rigid_registration, demon_registration
 from .image_registration import register_to_parent, ChildPlacement
+from .image_scoring import Scorer, BaselineScorer, score_windows, select_regions
 from .image_fft import power_spectrum, diffractogram_spots, adaptive_fourier_filter
 from .image_fft import rotational_symmetry_diffractogram
 from .image_main import get_atomic_pseudo_potential, convolve_probe, get_wavelength
@@ -50,4 +51,5 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'calculate_scherzer', 'get_rotation', 'calibrate_image_scale', 
            'align_crystal_reflections',
            'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality',
-           'register_to_parent', 'ChildPlacement']
+           'register_to_parent', 'ChildPlacement',
+           'Scorer', 'BaselineScorer', 'score_windows', 'select_regions']

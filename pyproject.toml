@@ -85,7 +85,7 @@ platforms = ["Linux", "Mac OSX", "Windows 11/10"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-exclude = ["*.tests", "*.tests.*", "tests.*", "tests", "build"]
+exclude = ["*.tests", "*.tests.*", "tests.*", "tests", "build", "for_asyncroscopy*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 pyTEMlib = ["data/*.json", "example_data/*", "mcp_server/schemas/*.json"]

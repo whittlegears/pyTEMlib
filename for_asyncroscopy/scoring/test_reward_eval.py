@@ -11,9 +11,11 @@ from math import comb
 import numpy as np
 import pytest
 
-from pyTEMlib.scoring import BaselineScorer, BaselineScorerV2
-from pyTEMlib.scoring.bench import main as bench
-from pyTEMlib.scoring.evaluate import (
+from pyTEMlib.image_tools import BaselineScorer
+
+from for_asyncroscopy.scoring.baseline_v2 import BaselineScorerV2
+from for_asyncroscopy.scoring.bench import main as bench
+from for_asyncroscopy.scoring.evaluate import (
     DEFAULT_THRESHOLD, FEATURE_KINDS, HELDOUT_SEEDS, TUNING_SEEDS, LabelledMap, _render_particles, _signal_per_nm,
     defocus, evaluate, make_labelled_map, render_cell,
 )
@@ -226,5 +228,5 @@ def test_bench_command_line(tmp_path, capsys):
     assert bench(["--scorer", "random", "--seeds", "3", "--brief", "--out", str(out)]) == 1
     record = json.loads(out.read_text().splitlines()[0])
     assert record["scorer"] == "random" and record["seeds"] == [3]
-    assert bench(["--scorer", "tests.test_reward_eval:EdgeCountScorer", "--seeds", "3", "--brief"]) == 1
+    assert bench(["--scorer", "for_asyncroscopy.scoring.test_reward_eval:EdgeCountScorer", "--seeds", "3", "--brief"]) == 1
     assert '"scorer": "edge_count"' in capsys.readouterr().out

@@ -43,8 +43,9 @@ from fastmcp.utilities.types import Image as MCPImage
 
 from pyTEMlib.version import __version__
 from pyTEMlib.image_tools.image_mosaic import assemble, level_shapes, pyramid_levels, register_tiles, stage_canvas_shape, stitch_quality
-from pyTEMlib.scoring import available_scorers, score_windows
+from pyTEMlib.image_tools.image_scoring import BaselineScorer, score_windows, select_regions
 
+from .frames import image_dataset
 from .jobs import JobRunner
 from .map_store import MapStore, level_shape_of, pixel_to_stage, stage_box_to_pixels
 
@@ -54,6 +55,9 @@ PROGRESS_STEPS = 1000  # assemble_map reports progress in these units
 DEFAULT_MAX_CANVAS_PIXELS = 400_000_000_000  # level-0 pixels; memory is bounded, so this only catches wrong metadata
 SCORE_MAX_SIDE = 4096  # score_map reads the finest level no larger than this, never a giant level 0 whole
 BLOCK = 512  # pyramid block and chunk side
+
+# The scorers score_map offers, by name.
+SCORERS = {scorer.name: scorer for scorer in (BaselineScorer(),)}
 
 # FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
 _REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
@@ -218,14 +222,14 @@ class MapTools:
 
     def _check_score(self, plan: dict) -> dict:
         scorer = plan.get("scorer", "baseline")
-        if scorer not in available_scorers():
-            raise ValueError(f"unknown scorer {scorer!r}; available: {sorted(available_scorers())}")
+        if scorer not in SCORERS:
+            raise ValueError(f"unknown scorer {scorer!r}; available: {sorted(SCORERS)}")
         self.store.map_metadata(plan["map"])
         return {"steps": 1}
 
     def _run_score(self, plan: dict, progress) -> dict:
         meta = self.store.map_metadata(plan["map"])
-        scorer = available_scorers()[plan.get("scorer", "baseline")]
+        scorer = SCORERS[plan.get("scorer", "baseline")]
         # The finest level that fits SCORE_MAX_SIDE, so scoring a map of any size reads a bounded image.
         fits = next((k for k in range(meta["levels"]) if max(level_shape_of(meta, k)) <= SCORE_MAX_SIDE), meta["levels"] - 1)
         level = max(int(plan.get("level", min(2, meta["levels"] - 1))), fits)
@@ -236,14 +240,8 @@ class MapTools:
         else:  # aim for about a 6 x 6 grid of candidate regions
             window = min(image.shape[:2]) // 6
         window = int(np.clip(window, 16, max(16, min(image.shape[:2]))))
-        scores = score_windows(image, scorer, window, stride=max(1, window // 2), metadata={"level": level, "pixel_size_m": pixel})
-        scores.sort(key=lambda s: s["value"], reverse=True)
-        top: list[dict] = []
-        for s in scores:  # keep chosen regions at least one window apart
-            if all(abs(s["row"] - t["row"]) >= window or abs(s["col"] - t["col"]) >= window for t in top):
-                top.append(s)
-            if len(top) >= int(plan.get("top_k", 5)):
-                break
+        scores = score_windows(image_dataset(image, pixel, title=plan["map"]), scorer, window, stride=max(1, window // 2))
+        top = select_regions(scores, int(plan.get("top_k", 5)), min_separation=window)  # chosen regions at least one window apart
         tag = plan.get("tag")
         added = []
         for k, s in enumerate(top):
@@ -496,7 +494,7 @@ class MapTools:
         @mcp.tool()
         def list_scorers() -> list[dict[str, str]]:
             """Scorers available to score_map: name, version and what they look for."""
-            return [{"name": s.name, "version": s.version, "description": s.description} for s in available_scorers().values()]
+            return [{"name": s.name, "version": s.version, "description": s.description} for s in SCORERS.values()]
 
         @mcp.tool()
         def list_tiles(run: str, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:

@@ -12,7 +12,7 @@ offset: stage only, naive appending (each tile placed from the previous one's
 match, the way an unbounded "append to the map" stitcher works), and
 ``register_tiles`` (bounded search plus a global solve with a drift model).
 
-    python benchmarks/mosaic_scale.py --sides 10,32,100 --assemble
+    python for_asyncroscopy/benchmarks/mosaic_scale.py --sides 10,32,100 --assemble
 
 Prints one JSON line per size.
 """

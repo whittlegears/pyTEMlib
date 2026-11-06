@@ -11,7 +11,7 @@ from fastmcp import Client
 jsonschema = pytest.importorskip("jsonschema")  # the job replies are validated against the envelope schema
 
 from pyTEMlib.mcp_server import ENVELOPE_SCHEMA_PATH, create_server
-from pyTEMlib.scoring import BaselineScorer
+from pyTEMlib.image_tools import BaselineScorer
 from .conftest import PIXEL, TILE, make_tiles
 
 

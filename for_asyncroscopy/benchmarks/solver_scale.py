@@ -9,7 +9,7 @@ positions plus the drift the first solve fitted.
 Each size runs in its own process under a wall-clock cap (``--cap-s``); a size that does not finish
 in time is recorded as a timeout row instead of running on.
 
-    python benchmarks/solver_scale.py --sides 100,320,650 --cap-s 1500 --out benchmarks/results/solver_scale.jsonl
+    python for_asyncroscopy/benchmarks/solver_scale.py --sides 100,320,650 --cap-s 1500 --out solver_scale.jsonl
 """
 
 from __future__ import annotations

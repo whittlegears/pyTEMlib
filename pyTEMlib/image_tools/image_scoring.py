@@ -1,5 +1,16 @@
 """
-Baseline scorer: in-focus feature edges, measured per feature.
+image_scoring part of image package of pycroscopy
+
+Rank the regions of an image by how good they are as a field of view.
+
+A scorer takes one region (a 2-D array) and its metadata and returns a value
+between 0 and 1 and a short human-readable reason; it carries a name and a
+version, so scores from different scorers (and versions) can be told apart
+later. Trained models, hand-written rules and LLM judges can all implement the
+``Scorer`` protocol. ``score_windows`` scores every window of a sidpy image
+dataset and ``select_regions`` keeps the best windows that do not overlap.
+
+The baseline scorer: in-focus feature edges, measured per feature.
 
 A deliberately simple, explainable stand-in until trained or physics-based
 scorers exist. It ranks a region higher when it holds features whose edges are
@@ -35,26 +46,30 @@ How 3.0.0 measures it, per feature rather than over the whole region:
 
 score = sharpness(edge width) x contrast(edge significance), each in 0-1.
 
-This is a detection proxy. ``pyTEMlib.scoring.evaluate`` checks it against
-synthetic maps with known particles of several kinds (separated, crowded and
-overlapping, single small, large, different pixel sampling, low contrast) and
-deliberately defocused, contaminated and empty regions; it has not been checked
-against what a microscopist would choose. Edge widths are in pixels: a feature
-must be resolved at the pixel size scored (``score_map`` picks the level), and
-a finite probe heavily oversampled would read as blur.
+This is a detection proxy, checked against synthetic maps with known
+particles of several kinds (separated, crowded and overlapping, single small,
+large, different pixel sampling, low contrast) and deliberately defocused,
+contaminated and empty regions; it has not been checked against what a
+microscopist would choose. Edge widths are in pixels: a feature must be
+resolved at the pixel size scored, and a finite probe heavily oversampled
+would read as blur.
 
 History: 1.0.0 measured the fraction of the region covered by edges and
 rewarded blur. 2.0.0 measured one global edge width (99th-percentile height /
 steepest gradient); overlapping particles doubled the height and read as blur,
 and a feature covering under ~1 % of the region was not reached by the 99th
 percentile, so crowded regions and fields sampled finer than the particles
-ranked at the bottom. 2.0.0 stays selectable as ``baseline_v2`` for comparison.
+ranked at the bottom.
 """
 
-from __future__ import annotations
+import typing
 
 import numpy as np
 from scipy import ndimage
+
+import sidpy
+
+from .image_utilities import get_pixel_size_m
 
 # For white noise of standard deviation 1 smoothed by a 1-pixel Gaussian: the high-pass residual
 # (data - smooth) has std 0.872 and each np.gradient component of the smoothed image has std 0.159.
@@ -91,7 +106,31 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     return float(values[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])])
 
 
+@typing.runtime_checkable
+class Scorer(typing.Protocol):
+    """How good a region of an image is as a field of view
+
+    Attributes
+    ----------
+    name: str
+        short name of the scorer
+    version: str
+        changes whenever the scorer's values change
+    description: str
+        what it rewards, in a sentence or two
+    """
+
+    name: str
+    version: str
+    description: str
+
+    def score(self, region: np.ndarray, metadata: dict) -> typing.Tuple[float, str]:
+        """Return (value in [0, 1], reason) for one region; metadata holds at least pixel_size_m."""
+
+
 class BaselineScorer:
+    """In-focus feature edges: per-feature edge sharpness times edge contrast (see the module docstring)."""
+
     name = "baseline"
     version = "3.0.0"
     description = (
@@ -181,31 +220,80 @@ class BaselineScorer:
         return value, reason
 
 
-# ---------------------------------------------------------------- 2.0.0, kept for comparison
+def score_windows(dataset: sidpy.Dataset, scorer: typing.Optional[Scorer] = None, window: int = 64,
+                  stride: typing.Optional[int] = None) -> typing.List[dict]:
+    """Score every window of an image
 
-V2_EDGE_WIDTH_MID_PX = 4.8
-V2_EDGE_WIDTH_SCALE_PX = 0.3
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image (data_type IMAGE) with calibrated spatial dimensions
+    scorer: Scorer or None
+        defaults to BaselineScorer
+    window: int
+        window side in pixels (shrunk to the image when the image is smaller)
+    stride: int or None
+        step between windows in pixels; defaults to the window (no overlap)
+
+    Returns
+    -------
+    scores: list of dict
+        one per window: ``row``, ``col`` (top-left pixel), ``window`` (pixels), ``value``
+        (in [0, 1]) and ``reason``. The scorer is given the window's pixels and
+        ``{'pixel_size_m', 'row', 'col', 'window'}``, the pixel size read from the
+        spatial dimensions.
+    """
+    if not isinstance(dataset, sidpy.Dataset):
+        raise TypeError('We need a sidpy.Dataset')
+    if dataset.data_type.name != 'IMAGE':
+        raise TypeError('We need sidpy.Dataset of sidpy.Datatype: IMAGE')
+    scorer = BaselineScorer() if scorer is None else scorer
+    pixel_size_m = float(np.mean(get_pixel_size_m(dataset)))
+    image = np.asarray(dataset)
+    window = int(window)
+    stride = int(stride or window)
+    if window < 1 or stride < 1:
+        raise ValueError('window and stride must be at least one pixel')
+    h, w = image.shape[:2]
+    window = min(window, h, w)
+    out = []
+    for r in range(0, max(1, h - window + 1), stride):
+        for c in range(0, max(1, w - window + 1), stride):
+            metadata = {'pixel_size_m': pixel_size_m, 'row': r, 'col': c, 'window': window}
+            value, reason = scorer.score(image[r:r + window, c:c + window], metadata)
+            out.append({'row': r, 'col': c, 'window': window, 'value': float(np.clip(value, 0.0, 1.0)), 'reason': reason})
+    return out
 
 
-class BaselineScorerV2:
-    """Baseline 2.0.0: one global edge width (99th-percentile height / steepest gradient). Superseded by 3.0.0."""
+def select_regions(scores: typing.Sequence[dict], top_k: int = 5,
+                   min_separation: typing.Optional[int] = None) -> typing.List[dict]:
+    """The best-scoring windows, each at least ``min_separation`` away from every better one
 
-    name = "baseline_v2"
-    version = "2.0.0"
-    description = "Superseded baseline 2.0.0 (global edge width), kept for comparison: crowded, overlapping or small features read as blurred."
+    Greedy non-maximum suppression: windows are taken best first, and a window is
+    skipped when both its row and its column are within ``min_separation`` pixels
+    of a window already taken (so half-overlapping windows do not all pick the
+    same feature).
 
-    def score(self, region: np.ndarray, metadata: dict) -> tuple[float, str]:
-        data = np.asarray(region, dtype=np.float64)
-        if data.size < 16 or min(data.shape[:2]) < 4 or not np.isfinite(data).all():
-            return 0.0, "region too small or not finite"
-        smooth = ndimage.gaussian_filter(data, 1.0)
-        background = float(np.median(smooth))
-        spread = float(np.percentile(smooth, 99) - background)
-        noise = float(np.std(data - smooth)) + 1e-9
-        contrast = 1.0 - np.exp(-max(spread, 0.0) / (6.0 * noise))
-        steepest = float(np.percentile(np.hypot(*np.gradient(smooth)), 99))
-        edge_width = max(spread, 1e-12) / max(steepest, 1e-12)
-        sharpness = _sigmoid_low(edge_width, V2_EDGE_WIDTH_MID_PX, V2_EDGE_WIDTH_SCALE_PX)
-        value = float(np.clip(contrast * sharpness, 0.0, 1.0))
-        reason = f"contrast {contrast:.2f} (features {spread:.3g} above background, noise {noise:.3g}); edge width {edge_width:.1f} px, sharpness {sharpness:.2f}"
-        return value, reason
+    Parameters
+    ----------
+    scores: list of dict
+        as returned by ``score_windows`` (``row``, ``col``, ``window``, ``value``)
+    top_k: int
+        how many windows to keep at most
+    min_separation: int or None
+        in pixels; defaults to each window's own size
+
+    Returns
+    -------
+    regions: list of dict
+        the kept entries of ``scores``, best first
+    """
+    ranked = sorted(scores, key=lambda s: s['value'], reverse=True)
+    kept: typing.List[dict] = []
+    for s in ranked:
+        if len(kept) >= int(top_k):
+            break
+        apart = s['window'] if min_separation is None else min_separation
+        if all(abs(s['row'] - t['row']) >= apart or abs(s['col'] - t['col']) >= apart for t in kept):
+            kept.append(s)
+    return kept

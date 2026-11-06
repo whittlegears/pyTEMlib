@@ -5,7 +5,7 @@ whose TileSource reads CHUNK_TILES consecutive tiles per request, each request d
 ``--read-latency-ms`` as a remote Tiled would be, with a cache much smaller than the run. It reports
 chunk reads per chunk (1.0 = each read once per matching pass) and the time spent waiting.
 
-    python benchmarks/tile_reads.py --sides 40,100 --cache-mb 16 --read-latency-ms 20
+    python for_asyncroscopy/benchmarks/tile_reads.py --sides 40,100 --cache-mb 16 --read-latency-ms 20
 """
 
 from __future__ import annotations
