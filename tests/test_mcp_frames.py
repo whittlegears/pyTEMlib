@@ -4,7 +4,9 @@ import pytest
 
 import numpy as np
 
-from pyTEMlib.mcp_server.frames import FrameError, features_in, frame_of, pixel_of, register, stage_of
+from pyTEMlib.mcp_server.frames import FrameError, frame_of, pixel_of, register, stage_of
+
+from .conftest import gaussian_spots
 
 
 class Node:
@@ -116,28 +118,8 @@ def test_the_sample_of_an_array_inside_a_file_is_read_from_the_file():
     assert store.sample_of("other") == {}
 
 
-def _particles(shape=(256, 256), spots=((60, 80, 6.0, 40.0), (180, 150, 4.0, 25.0), (128, 230, 5.0, 2.0)), seed=1):
-    """Gaussian particles (row, col, sigma px, height) on noise of standard deviation 1."""
-    rng = np.random.default_rng(seed)
-    yy, xx = np.mgrid[: shape[0], : shape[1]]
-    image = 10.0 + rng.normal(0.0, 1.0, shape)
-    for row, col, sigma, height in spots:
-        image += height * np.exp(-((yy - row) ** 2 + (xx - col) ** 2) / (2 * sigma**2))
-    return image
-
-
-def test_features_are_the_distinct_blobs_strongest_first():
-    found = features_in(_particles(), 1e-9, n=5)
-    assert [(round(f["row"]), round(f["col"])) for f in found[:2]] == [(60, 80), (180, 150)]
-    assert found[0]["contrast"] > found[1]["contrast"] >= 3.0
-    assert 8e-9 < found[0]["diameter_m"] < 3e-8
-    assert all(not (abs(f["row"] - 128) < 5 and abs(f["col"] - 230) < 5) for f in found)  # 2 x the noise: not distinct
-    assert features_in(_particles(spots=()), 1e-9) == []
-    assert len(features_in(_particles(), 1e-9, n=1)) == 1
-
-
 def test_find_features_gives_stage_positions_of_an_image_and_refuses_a_map():
-    image = _particles()
+    image = gaussian_spots()
     meta = {**IMAGE}
     node = Node(meta, shape=image.shape)
     node.read = lambda: image

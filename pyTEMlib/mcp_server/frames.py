@@ -10,6 +10,10 @@ had none, and the reply says so.
 ``find_features`` gives an agent that cannot see images where the distinct features of one are: bright blobs
 (particles, clusters, atom columns at atomic scale) with their pixel and stage positions, size and contrast, so it
 can aim a finer image at something a placement can match.
+
+An image's frame holds it as a sidpy dataset (``image_dataset``): the transform and the blob finder are
+pyTEMlib's ``image_tools.pixel_to_stage``, ``stage_to_pixel`` and ``find_blobs``, and asyncroscopy's flat
+metadata is translated with ``image_tools.experiment_from_asyncroscopy``.
 """
 
 from __future__ import annotations
@@ -18,14 +22,16 @@ import json
 import math
 from typing import Any
 
+import dask.array
 import numpy as np
 import sidpy
 
-from .map_store import pixel_to_stage
+from pyTEMlib.image_tools.image_atoms import find_blobs
+from pyTEMlib.image_tools.image_utilities import experiment_from_asyncroscopy, get_image_centre_m, pixel_to_stage, stage_to_pixel
+
+from . import map_store
 
 MAX_TILT_DEG = 0.05
-BLOB_DIAMETER_PER_SIGMA = 2.0 * math.sqrt(2.0)  # a Laplacian-of-Gaussian blob of scale sigma is this many sigmas across
-MIN_CONTRAST = 3.0  # a feature's mean above the background, in units of the image's noise: below it, it is noise
 AXES = "rows=+y, columns=+x"
 
 
@@ -82,7 +88,8 @@ def frame_of(store, key: str) -> dict[str, Any]:
         return {"kind": "map", "metadata": meta, "pixel_size_m": float(meta["pixel_size_m"]), "shape": list(meta["canvas_shape"]), "sample": store.sample_of(key)}
     node = image_node(store, key)
     m = dict(node.metadata)
-    stage = _vector(m.get("stage_reported_m")) or _vector(m.get("stage_commanded_m"))
+    experiment = experiment_from_asyncroscopy(m)
+    stage = experiment.get("stage_position")
     pixel = m.get("pixel_size_m")
     if not stage or len(stage) < 2 or not isinstance(pixel, (int, float)) or not pixel > 0:
         raise FrameError(f"{key} does not record where it was taken (stage_reported_m and pixel_size_m)")
@@ -97,68 +104,45 @@ def frame_of(store, key: str) -> dict[str, Any]:
     if any(abs(t) > MAX_TILT_DEG for t in tilts):
         raise FrameError(f"{key} was taken at tilt {tilts} degrees; the flat pixel-to-stage transform would be wrong there")
     shape = list(node.structure().shape)[-2:]
-    shift = _vector(m.get("image_shift_m"))
-    if shift is not None and not all(math.isfinite(v) for v in shift[:2]):
+    shift = experiment.get("image_shift")
+    if shift is not None and not (len(shift) >= 2 and all(math.isfinite(v) for v in shift[:2])):
         raise FrameError(f"{key} records an image shift that is not a number ({shift})")
-    centre = [stage[0] + shift[0], stage[1] + shift[1]] if shift else stage[:2]
+    # The frame needs the image's shape, calibration and position, not its pixels: a lazy array of zeros stands in.
+    dataset = image_dataset(dask.array.zeros(shape, chunks=shape), float(pixel), experiment, title=key)
     try:
         current = float(m["beam_current_pa"]) if "beam_current_pa" in m else None
     except (TypeError, ValueError):
         current = None
-    return {"kind": "image", "centre_xy_m": centre, "pixel_size_m": float(pixel), "shape": shape, "sample": store.sample_of(key),
-            "shift_recorded": shift is not None, "beam_current_pa": current}
+    return {"kind": "image", "dataset": dataset, "centre_xy_m": [float(v) for v in get_image_centre_m(dataset)], "pixel_size_m": float(pixel),
+            "shape": shape, "sample": store.sample_of(key), "shift_recorded": shift is not None, "beam_current_pa": current}
 
 
 def stage_of(frame: dict, row: float, col: float) -> tuple[float, float]:
     if frame["kind"] == "map":
-        return pixel_to_stage(frame["metadata"], row, col)
-    rows, cols = frame["shape"]
-    p = frame["pixel_size_m"]
-    cx, cy = frame["centre_xy_m"]
-    return cx + (col - (cols - 1) / 2.0) * p, cy + (row - (rows - 1) / 2.0) * p
+        return map_store.pixel_to_stage(frame["metadata"], row, col)
+    return pixel_to_stage(frame["dataset"], row, col)
 
 
 def pixel_of(frame: dict, x: float, y: float) -> tuple[float, float]:
-    p = frame["pixel_size_m"]
     if frame["kind"] == "map":
+        p = frame["pixel_size_m"]
         ox, oy = frame["metadata"]["origin_xy_m"]
         return (y - oy) / p, (x - ox) / p
-    rows, cols = frame["shape"]
-    cx, cy = frame["centre_xy_m"]
-    return (y - cy) / p + (rows - 1) / 2.0, (x - cx) / p + (cols - 1) / 2.0
+    return stage_to_pixel(frame["dataset"], x, y)
 
 
-def features_in(image: np.ndarray, pixel_m: float, n: int = 5, min_size_m: float | None = None, max_size_m: float | None = None) -> list[dict]:
-    """The ``n`` most distinct bright blobs of ``image``: [{"row", "col", "diameter_m", "contrast"}], strongest first.
-
-    Sizes default to 3 pixels up to an eighth of the image. Contrast is the blob's mean above the image's median, in
-    units of its noise (the median absolute deviation); blobs under MIN_CONTRAST, or not wholly inside the image, are
-    left out."""
-    from skimage.feature import blob_log
-
-    image = np.asarray(image, dtype=np.float64)
-    rows, cols = image.shape
-    widest = min(rows, cols) / BLOB_DIAMETER_PER_SIGMA  # a feature wholly inside the image is no wider than it
-    if n <= 0 or (min_size_m or 0.0) / pixel_m / BLOB_DIAMETER_PER_SIGMA > widest:
-        return []  # asked for none, or for features wider than the image (searching would only allocate gigabytes)
-    background = float(np.median(image))
-    noise = float(np.median(np.abs(image - background))) * 1.4826 or float(image.std()) or 1.0
-    scaled = np.clip((image - background) / noise, 0.0, None)
-    smallest = max(1.0, (min_size_m or 3.0 * pixel_m) / pixel_m / BLOB_DIAMETER_PER_SIGMA)
-    largest = min(widest, max(smallest, (max_size_m or min(rows, cols) * pixel_m / 8.0) / pixel_m / BLOB_DIAMETER_PER_SIGMA))
-    found = []
-    for row, col, sigma in blob_log(scaled, min_sigma=smallest, max_sigma=largest, num_sigma=8, threshold=None, threshold_rel=0.05):
-        radius = sigma * BLOB_DIAMETER_PER_SIGMA / 2.0
-        if row - radius < 0 or col - radius < 0 or row + radius > rows - 1 or col + radius > cols - 1:
-            continue
-        r0, r1 = int(max(0, row - radius)), int(min(rows, row + radius + 1))
-        c0, c1 = int(max(0, col - radius)), int(min(cols, col + radius + 1))
-        yy, xx = np.mgrid[r0:r1, c0:c1]
-        inside = (yy - row) ** 2 + (xx - col) ** 2 <= radius**2
-        contrast = (float(image[r0:r1, c0:c1][inside].mean()) - background) / noise
-        if contrast >= MIN_CONTRAST:
-            found.append({"row": float(row), "col": float(col), "diameter_m": float(2.0 * radius * pixel_m), "contrast": round(contrast, 2)})
-    return sorted(found, key=lambda f: -f["contrast"])[: max(0, int(n))]
+def features_of(frame: dict, image: np.ndarray, n: int = 5, min_size_m: float | None = None, max_size_m: float | None = None) -> list[dict]:
+    """The ``n`` most distinct bright blobs of an image (see ``image_tools.find_blobs``) with pixel and stage positions:
+    [{"row", "col", "diameter_m", "contrast", "x_m", "y_m"}], strongest first. Sizes default to 3 pixels up to an eighth
+    of the image."""
+    dataset = image_dataset(np.asarray(image), frame["pixel_size_m"], frame["dataset"].metadata["experiment"])
+    nm = 1e9  # image_dataset's dimensions are in nm
+    blobs = find_blobs(dataset, n, None if min_size_m is None else min_size_m * nm, None if max_size_m is None else max_size_m * nm)
+    features = []
+    for row, col, diameter, contrast in blobs:
+        x, y = pixel_to_stage(dataset, row, col)
+        features.append({"row": float(row), "col": float(col), "diameter_m": float(diameter / nm), "contrast": round(float(contrast), 2), "x_m": x, "y_m": y})
+    return features
 
 
 def register(mcp, store) -> None:
@@ -209,9 +193,7 @@ def register(mcp, store) -> None:
             return {"error": {"code": "no_frame", "message": str(exc)}}
         if frame["kind"] != "image":
             return {"error": {"code": "not_an_image", "message": f"{image} is a stitched map: score_map ranks a map's regions"}}
-        features = features_in(np.asarray(image_node(store, image).read()), frame["pixel_size_m"], n, min_size_m, max_size_m)
-        for f in features:
-            f["x_m"], f["y_m"] = stage_of(frame, f["row"], f["col"])
+        features = features_of(frame, image_node(store, image).read(), n, min_size_m, max_size_m)
         note = {} if frame["shift_recorded"] else {"note": "this image does not record its image shift, so x_m, y_m assume it had none"}
         if not features and n > 0 and frame.get("beam_current_pa") == 0:
             note["hint"] = "this image was taken with the beam blanked (beam_current_pa 0), so it shows only noise: unblank_beam and take it again"

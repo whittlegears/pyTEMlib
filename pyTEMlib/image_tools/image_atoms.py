@@ -9,6 +9,8 @@ part of pycroscopy.image
 
 the core pycroscopy package
 """
+import typing
+
 import numpy as np
 
 import skimage
@@ -89,6 +91,75 @@ def find_atoms(image: sidpy.Dataset, atom_size: float = 0.1, threshold: float = 
     atoms = skimage.feature.blob_log(im, max_sigma=atom_size/scale_x, threshold=threshold)
 
     return atoms
+
+
+BLOB_DIAMETER_PER_SIGMA = 2.0 * np.sqrt(2.0)  # a Laplacian-of-Gaussian blob of scale sigma is this many sigmas across
+MIN_BLOB_CONTRAST = 3.0  # a blob's mean above the background, in units of the image's noise: below it, it is noise
+
+
+def find_blobs(dataset: sidpy.Dataset, n: int = 5, min_size: typing.Optional[float] = None,
+               max_size: typing.Optional[float] = None) -> np.ndarray:
+    """The most distinct bright blobs of an image (particles, clusters; atom columns at atomic scale)
+
+    Blobs are found with a Laplacian of Gaussian (``skimage.feature.blob_log``)
+    on the image scaled to its noise. Contrast is a blob's mean above the
+    image's median, in units of its noise (the median absolute deviation);
+    blobs under MIN_BLOB_CONTRAST, or not wholly inside the image, are left out.
+
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image (data_type IMAGE) with calibrated spatial dimensions
+    n: int
+        how many blobs to return at most
+    min_size: float or None
+        smallest blob diameter to look for, in the units of the spatial dimensions;
+        defaults to 3 pixels
+    max_size: float or None
+        largest blob diameter to look for, in the units of the spatial dimensions;
+        defaults to an eighth of the image
+
+    Returns
+    -------
+    blobs: numpy array (Nx4)
+        row and column (pixels), diameter (units of the spatial dimensions) and contrast
+        of each blob, strongest first
+    """
+    if not isinstance(dataset, sidpy.Dataset):
+        raise TypeError('We need a sidpy.Dataset')
+    if dataset.data_type.name != 'IMAGE':
+        raise TypeError('We need sidpy.Dataset of sidpy.Datatype: IMAGE')
+    dims = dataset.get_image_dims(return_axis=True)
+    if len({str(dim.units) for dim in dims}) != 1:
+        raise ValueError('the spatial dimensions must share one unit')
+    pixel = float(np.mean([abs(dim.values[-1] - dim.values[0]) / (len(dim.values) - 1) for dim in dims]))
+    image = np.asarray(dataset, dtype=np.float64)
+    found = np.zeros((0, 4))
+    rows, cols = image.shape
+    widest = min(rows, cols) / BLOB_DIAMETER_PER_SIGMA  # a blob wholly inside the image is no wider than it
+    if n <= 0 or (min_size or 0.0) / pixel / BLOB_DIAMETER_PER_SIGMA > widest:
+        return found  # asked for none, or for blobs wider than the image (searching would only allocate gigabytes)
+    background = float(np.median(image))
+    noise = float(np.median(np.abs(image - background))) * 1.4826 or float(image.std()) or 1.0
+    scaled = np.clip((image - background) / noise, 0.0, None)
+    smallest = max(1.0, (min_size or 3.0 * pixel) / pixel / BLOB_DIAMETER_PER_SIGMA)
+    largest = min(widest, max(smallest, (max_size or min(rows, cols) * pixel / 8.0) / pixel / BLOB_DIAMETER_PER_SIGMA))
+    blobs = []
+    for row, col, sigma in skimage.feature.blob_log(scaled, min_sigma=smallest, max_sigma=largest, num_sigma=8,
+                                                    threshold=None, threshold_rel=0.05):
+        radius = sigma * BLOB_DIAMETER_PER_SIGMA / 2.0
+        if row - radius < 0 or col - radius < 0 or row + radius > rows - 1 or col + radius > cols - 1:
+            continue
+        r0, r1 = int(max(0, row - radius)), int(min(rows, row + radius + 1))
+        c0, c1 = int(max(0, col - radius)), int(min(cols, col + radius + 1))
+        yy, xx = np.mgrid[r0:r1, c0:c1]
+        inside = (yy - row) ** 2 + (xx - col) ** 2 <= radius**2
+        contrast = (float(image[r0:r1, c0:c1][inside].mean()) - background) / noise
+        if contrast >= MIN_BLOB_CONTRAST:
+            blobs.append((float(row), float(col), float(2.0 * radius * pixel), contrast))
+    if blobs:
+        found = np.array(sorted(blobs, key=lambda b: -b[3])[:int(n)])
+    return found
 
 
 def atoms_clustering(atoms: np.ndarray, mid_atoms: np.ndarray,

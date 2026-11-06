@@ -18,8 +18,10 @@ Submodules
  
 from .image_window import ImageWindowing
 from .image_utilities import crop_image, flatten_image, inpaint_image, warp, rebin
+from .image_utilities import get_pixel_size_m, get_image_centre_m, pixel_to_stage, stage_to_pixel
+from .image_utilities import experiment_from_asyncroscopy
 from .image_clean import decon_lr, clean_svd, background_correction
-from .image_atoms import find_atoms, atom_refine, intensity_area, atoms_clustering
+from .image_atoms import find_atoms, atom_refine, intensity_area, atoms_clustering, find_blobs
 from .image_graph import find_polyhedra, breadth_first_search, breadth_first_search_flexible
 from .image_graph import get_base_atoms
 from .image_distortion import get_distortion_matrix, undistort, undistort_sitk
@@ -52,4 +54,6 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'align_crystal_reflections',
            'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality',
            'register_to_parent', 'ChildPlacement',
-           'Scorer', 'BaselineScorer', 'score_windows', 'select_regions']
+           'Scorer', 'BaselineScorer', 'score_windows', 'select_regions', 'find_blobs',
+           'get_pixel_size_m', 'get_image_centre_m', 'pixel_to_stage', 'stage_to_pixel',
+           'experiment_from_asyncroscopy']
