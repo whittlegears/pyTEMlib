@@ -1049,6 +1049,7 @@ def _cast(array: np.ndarray, dtype) -> np.ndarray:
 
 
 def pyramid_levels(canvas_shape: tuple[int, int], min_size: int = 256) -> int:
+    """Number of pyramid levels ``assemble`` writes by default: halve until the larger side is at most ``min_size``."""
     levels = 1
     h, w = canvas_shape
     while max(h, w) > min_size:

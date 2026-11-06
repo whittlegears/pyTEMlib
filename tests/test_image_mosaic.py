@@ -79,6 +79,18 @@ class CountingWriter:
         self.written[level][row0 : row0 + data.shape[0], col0 : col0 + data.shape[1]] = True
 
 
+def test_the_exported_pyramid_helpers_describe_what_assemble_writes():
+    import pyTEMlib.image_tools as it
+
+    tiles, _ = make_tiles(stage_error_px=0.0, grid=3)
+    placement = register_tiles(tiles, refine=False)
+    canvas = it.stage_canvas_shape([t.stage_xy_m for t in tiles], [t.shape for t in tiles], [t.pixel_size_m for t in tiles])
+    assert canvas == placement.canvas_shape
+    levels, _ = stitch_to_arrays(tiles, placement)
+    assert len(levels) == it.pyramid_levels(placement.canvas_shape)
+    assert [level.shape for level in levels] == it.level_shapes(placement.canvas_shape, len(levels))
+
+
 def test_assembly_memory_is_bounded_by_block_size_and_writes_every_pixel_once():
     rng = np.random.default_rng(5)
     tiles = [Tile(rng.integers(0, 1000, (512, 512), dtype=np.uint16), ((c * 480 + 256) * PIXEL, (r * 480 + 256) * PIXEL), PIXEL, r * 8 + c) for r in range(8) for c in range(8)]

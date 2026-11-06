@@ -37,6 +37,7 @@ from .image_main import get_line_selection_points, get_line_profile, histogram_p
 from .image_main import calculate_ctf, calculate_scherzer, get_rotation, calibrate_image_scale 
 from .image_main import align_crystal_reflections
 from .image_mosaic import Tile, register_tiles, assemble, stitch_mosaic, stitch_quality
+from .image_mosaic import stage_canvas_shape, pyramid_levels, level_shapes
 
 
 __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_correction',
@@ -53,6 +54,7 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'calculate_scherzer', 'get_rotation', 'calibrate_image_scale', 
            'align_crystal_reflections',
            'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality',
+           'stage_canvas_shape', 'pyramid_levels', 'level_shapes',
            'register_to_parent', 'ChildPlacement',
            'Scorer', 'BaselineScorer', 'score_windows', 'select_regions', 'find_blobs',
            'get_pixel_size_m', 'get_image_centre_m', 'pixel_to_stage', 'stage_to_pixel',
