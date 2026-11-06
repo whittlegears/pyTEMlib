@@ -1,7 +1,7 @@
 """MCP tools that place a finer image on a coarser one and keep the placements (a multiscale map's links).
 
 ``place_image`` reads the child image and the part of its parent (a stitched map or a single image) around where
-it should be, places it with ``pyTEMlib.image_tools.register.register_child``, and appends the result to an
+it should be, places it with ``pyTEMlib.image_tools.register_to_parent``, and appends the result to an
 append-only JSON-lines log (one record per call, placed or not, never rewritten). ``list_placements`` reads it.
 
 Where a child should be comes from the stage position it records, or from ``centre_xy_m`` when it was aimed by
@@ -27,9 +27,9 @@ from typing import Any
 
 import numpy as np
 
-from pyTEMlib.image_tools.register import register_child
+from pyTEMlib.image_tools.image_registration import register_to_parent
 
-from .frames import FrameError, frame_of, image_node, pixel_of, stage_of
+from .frames import FrameError, frame_of, image_dataset, image_node, pixel_of, stage_of
 
 DEFAULT_WINDOW_M = 4e-7  # the stage's error on a typical instrument: a stage-aimed child is searched this far
 EDGE_PX = 4  # parent pixels read beyond the window, so the correlation has room at the window's edge
@@ -101,9 +101,9 @@ def place(store, log: PlacementLog, image: str, parent: str, centre_xy_m: list[f
         return log.append({**record, **result})
     child = np.asarray(image_node(store, image).read(), dtype=np.float64)
     region = read_region(store, parent_frame, parent, slice(r0, r1), slice(c0, c1))
-    placed = register_child(
-        child, child_px, region, parent_px, (row - r0, col - c0), window_px, rotation_rad=math.radians(rotation_deg),
-        parent_tile={"key": parent, "version": record.get("parent_version", parent)},
+    placed = register_to_parent(
+        image_dataset(child, child_px, title=image), image_dataset(region, parent_px, title=parent), (row - r0, col - c0), window_px,
+        rotation_rad=math.radians(rotation_deg),
     ).to_dict()
     result = {k: placed[k] for k in ("status", "reason", "score", "ambiguity", "scale", "rotation_rad", "uncertainty_px", "method", "method_version", "inputs_sha256")}
     if placed["status"] == "placed":

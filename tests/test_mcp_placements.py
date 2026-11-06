@@ -8,7 +8,7 @@ import pytest
 from pyTEMlib.mcp_server.frames import FrameError
 from pyTEMlib.mcp_server.placement_tools import PlacementLog, place
 
-from .test_register_child import STEP, fine_scene, parent_of
+from .conftest import STEP, fine_scene, parent_of
 
 AXES = "rows=+y, columns=+x"
 

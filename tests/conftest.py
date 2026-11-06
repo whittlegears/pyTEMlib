@@ -60,6 +60,28 @@ def gaussian_spots(shape=(256, 256), spots=((60, 80, 6.0, 40.0), (180, 150, 4.0,
     return image
 
 
+# ---------------------------------------------------------------- a fine image and its coarse parent
+
+STEP = 8  # parent pixels are STEP child pixels wide
+
+
+def fine_scene(size=2400, seed=0):
+    """Smooth texture with brighter blobs, seen at the child's (fine) pixel size."""
+    rng = np.random.default_rng(seed)
+    image = ndimage.gaussian_filter(rng.normal(0, 1, (size, size)), 6)
+    blobs = np.zeros((size, size))
+    blobs[rng.integers(0, size, 300), rng.integers(0, size, 300)] = 1.0
+    return image / image.std() + 8 * ndimage.gaussian_filter(blobs, 10) / ndimage.gaussian_filter(blobs, 10).max()
+
+
+def parent_of(scene, step=STEP):
+    """What a coarse scan sees: the scene smoothed, then sampled at every step-th pixel centre."""
+    smooth = ndimage.gaussian_filter(scene, 0.4 * step)
+    centres = np.arange(step // 2, scene.shape[0], step) - 0.5
+    rr, cc = np.meshgrid(centres, centres, indexing="ij")
+    return ndimage.map_coordinates(smooth, [rr, cc], order=1)
+
+
 # ---------------------------------------------------------------- tiles of a map
 
 def scene(size=1300, blobs=500, seed=0):

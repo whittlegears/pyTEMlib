@@ -19,6 +19,7 @@ import math
 from typing import Any
 
 import numpy as np
+import sidpy
 
 from .map_store import pixel_to_stage
 
@@ -41,6 +42,21 @@ def _vector(value) -> list[float] | None:
     if isinstance(value, (list, tuple)) and all(isinstance(v, (int, float)) for v in value):
         return [float(v) for v in value]
     return None
+
+
+def image_dataset(data, pixel_size_m: float, experiment: dict | None = None, title: str = "image") -> sidpy.Dataset:
+    """A sidpy IMAGE dataset of ``data`` (a numpy or dask array) with square pixels of ``pixel_size_m``.
+
+    The spatial dimensions are y (rows) and x (columns) in nm from the first pixel, the pyTEMlib convention;
+    ``experiment`` becomes ``metadata['experiment']`` (``stage_position``, ``image_shift``, ...)."""
+    dataset = sidpy.Dataset.from_array(data, title=title)
+    dataset.data_type = "IMAGE"
+    pixel_nm = float(pixel_size_m) * 1e9
+    for axis, name in enumerate(("y", "x")):
+        dataset.set_dimension(axis, sidpy.Dimension(np.arange(dataset.shape[axis]) * pixel_nm, name=name, units="nm",
+                                                    quantity="Length", dimension_type="spatial"))
+    dataset.metadata["experiment"] = dict(experiment or {})
+    return dataset
 
 
 def image_node(store, key: str):
