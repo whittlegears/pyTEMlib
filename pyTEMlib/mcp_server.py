@@ -9,11 +9,8 @@ from fastmcp import FastMCP
 import numpy as np
 import os
 import json
-import logging
 from typing import Dict, List, Any, Optional, Union
 import traceback
-
-logger = logging.getLogger(__name__)
 
 # Import pyTEMlib modules
 try:
@@ -22,7 +19,7 @@ try:
     from pyTEMlib import crystal_tools, diffraction_tools, probe_tools, graph_tools
     PYTEMLIB_AVAILABLE = True
 except ImportError as e:
-    logger.warning("pyTEMlib not available: %s", e)  # stderr: stdout carries an stdio MCP session
+    print(f"Warning: pyTEMlib not available: {e}")
     PYTEMLIB_AVAILABLE = False
 
 # Create MCP server
@@ -308,3 +305,31 @@ plt.show()
 """
 
     return script
+
+@mcp.tool()
+def get_available_tools() -> str:
+    """List all available MCP tools for pyTEMlib."""
+    tools = [
+        "get_pytemlib_status - Check if pyTEMlib is loaded",
+        "calculate_electron_wavelength - Calculate electron wavelength",
+        "list_supported_file_formats - Show supported file formats",
+        "open_tem_file - Open TEM data files",
+        "list_loaded_datasets - List currently loaded datasets",
+        "get_dataset_info - Get detailed dataset information",
+        "calculate_probe_size - Calculate electron probe size",
+        "get_element_info - Get element information for spectroscopy",
+        "analyze_diffraction_pattern - Analyze diffraction patterns",
+        "create_visualization_script - Generate visualization code",
+        "get_available_tools - List all available tools"
+    ]
+
+    return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in tools)
+
+# Run the server
+if __name__ == "__main__":
+    print("Starting pyTEMlib MCP Server...")
+
+    mcp.run(transport="sse",
+        host="127.0.0.1",  # Use "127.0.0.1" for local-only, "0.0.0.0" to expose on your network
+        port=8003,
+        path="/mcp")

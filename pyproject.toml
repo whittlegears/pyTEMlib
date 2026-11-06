@@ -70,14 +70,9 @@ Documentation = "https://pycroscopy.github.io/pyTEMlib/"
 pyTEMlib = "pyTEMlib:main"
 
 [project.optional-dependencies]
-# Map tools of the MCP server: Tiled client for reading runs and writing maps.
-mcp = [
-    "tiled[client]",
-]
 test = [
     "pytest",
-    "pytest-runner",
-    "jsonschema",  # tests/test_mcp_map_tools.py validates job replies against the envelope schema
+    "pytest-runner"
 ]
 
 [tool.setuptools]
@@ -85,10 +80,10 @@ platforms = ["Linux", "Mac OSX", "Windows 11/10"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-exclude = ["*.tests", "*.tests.*", "tests.*", "tests", "build", "for_asyncroscopy*", "benchmarks*"]
+exclude = ["*.tests", "*.tests.*", "tests.*", "tests", "build"]
 
 [tool.setuptools.package-data]
-pyTEMlib = ["data/*.json", "example_data/*", "mcp_server/schemas/*.json"]
+pyTEMlib = ["data/*.json", "example_data/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "pyTEMlib.version.__version__"}
