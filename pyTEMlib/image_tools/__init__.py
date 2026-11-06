@@ -23,7 +23,7 @@ from .image_utilities import experiment_from_asyncroscopy
 from .image_clean import decon_lr, clean_svd, background_correction
 from .image_atoms import find_atoms, atom_refine, intensity_area, atoms_clustering, find_blobs
 from .image_graph import find_polyhedra, breadth_first_search, breadth_first_search_flexible
-from .image_graph import get_base_atoms
+from .image_graph import get_base_atoms, circum_center
 from .image_distortion import get_distortion_matrix, undistort, undistort_sitk
 from .image_registration import complete_registration, rigid_registration, demon_registration
 from .image_registration import register_to_parent, ChildPlacement
@@ -52,7 +52,7 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'LineSelector', 'get_profile', 'get_line_selection_points_interpolated', 
            'get_line_selection_points', 'get_line_profile', 'histogram_plot', 'calculate_ctf', 
            'calculate_scherzer', 'get_rotation', 'calibrate_image_scale', 
-           'align_crystal_reflections',
+           'align_crystal_reflections', 'circum_center',
            'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality',
            'stage_canvas_shape', 'pyramid_levels', 'level_shapes',
            'register_to_parent', 'ChildPlacement',
