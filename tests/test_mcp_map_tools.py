@@ -4,14 +4,15 @@ import asyncio
 import json
 
 import h5py
-import jsonschema
 import numpy as np
 import pytest
 from fastmcp import Client
 
+jsonschema = pytest.importorskip("jsonschema")  # the job replies are validated against the envelope schema
+
 from pyTEMlib.mcp_server import ENVELOPE_SCHEMA_PATH, create_server
 from pyTEMlib.scoring import BaselineScorer
-from .test_mosaic import PIXEL, TILE, make_tiles
+from .conftest import PIXEL, TILE, make_tiles
 
 
 def write_run(path, grid=3):
@@ -281,7 +282,7 @@ def test_abort_during_registration_stops_promptly(client, run_file, monkeypatch)
     import threading
     import time
 
-    from pyTEMlib.image_tools import mosaic
+    from pyTEMlib.image_tools import image_mosaic as mosaic
 
     real = mosaic.bounded_shift
     calls = []
@@ -415,3 +416,16 @@ def test_every_tool_call_is_traced_with_its_arguments_and_outcome(tmp_path, run_
     assert '"kind": "candidate"' in lines[0]["arguments"] and lines[0]["ok"] is False and lines[0]["error"]
     assert lines[1]["ok"] is True and lines[1]["source"] == "analysis" and "caller" in lines[1] and "run" in lines[1]
     loop.run_until_complete(c.__aexit__(None, None, None))
+
+
+def test_assemble_progress_only_goes_up(tmp_path):
+    from pyTEMlib.mcp_server.map_store import MapStore
+    from pyTEMlib.mcp_server.map_tools import PROGRESS_STEPS, MapTools
+
+    from .test_map_store_remote_reads import write_layout2
+
+    path, _ = write_layout2(tmp_path / "run.h5")
+    tools = MapTools(MapStore(local_roots=[tmp_path]))
+    seen = []
+    tools._run_assemble({"run": path, "eds_pois": True}, lambda done, total=None: seen.append(done))
+    assert seen == sorted(seen) and seen[-1] == PROGRESS_STEPS

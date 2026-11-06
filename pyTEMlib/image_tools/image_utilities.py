@@ -2,6 +2,9 @@
 image_utilities part of image package of pycroscopy
 
 """
+import json
+import typing
+
 import numpy as np
 import scipy
 from skimage.restoration import inpaint
@@ -306,3 +309,200 @@ def inpaint_image(sid_dset, mask = None, channel = None):
 
     data_set.metadata["mask"] = mask
     return data_set
+
+
+#####################################################
+# Pixel size and stage position of an image
+#####################################################
+
+# Metres per unit of a spatial dimension.
+LENGTH_UNITS_M = {'m': 1.0, 'mm': 1e-3, 'um': 1e-6, 'µm': 1e-6, 'micron': 1e-6, 'nm': 1e-9,
+                  'a': 1e-10, 'å': 1e-10, 'ang': 1e-10, 'angstrom': 1e-10, 'pm': 1e-12}
+
+# Where the flat per-image metadata that asyncroscopy records (Tiled metadata or HDF5
+# attributes) goes in ``metadata['experiment']``; the first source key present wins.
+ASYNCROSCOPY_EXPERIMENT_KEYS = {
+    'stage_position': ('stage_reported_m', 'stage_commanded_m'),  # [x, y, z, alpha, beta]: metres, tilts in degrees
+    'image_shift': ('image_shift_m',),  # [x, y] in metres
+}
+
+
+def experiment_from_asyncroscopy(metadata: dict) -> dict:
+    """Translate asyncroscopy's flat image metadata into ``metadata['experiment']`` keys
+
+    asyncroscopy records an image's stage position as ``stage_reported_m``
+    (else ``stage_commanded_m``), a list ``[x, y, z, alpha, beta]`` in metres
+    with tilts in degrees, and its beam (image) shift as ``image_shift_m``,
+    ``[x, y]`` in metres; values may be JSON strings.
+    ``ASYNCROSCOPY_EXPERIMENT_KEYS`` lists the mapping.
+
+    Parameters
+    ----------
+    metadata: dict
+        flat metadata of one image
+
+    Returns
+    -------
+    experiment: dict
+        ``stage_position`` and ``image_shift`` (lists of float) where recorded
+    """
+    experiment = {}
+    for target, sources in ASYNCROSCOPY_EXPERIMENT_KEYS.items():
+        for source in sources:
+            value = _as_list(metadata.get(source))
+            if value is not None:
+                experiment[target] = value
+                break
+    return experiment
+
+
+def _as_list(value) -> typing.Optional[list]:
+    """A list of float from a list, tuple, array or JSON string of numbers; None otherwise."""
+    if isinstance(value, (bytes, str)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)) and len(value) > 0 and \
+            all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        return [float(v) for v in value]
+    return None
+
+
+def _xy(value, name: str) -> np.ndarray:
+    """(x, y) in metres from a dict with keys x and y (any case) or a sequence [x, y, ...]."""
+    if isinstance(value, dict):
+        lower = {str(k).lower(): v for k, v in value.items()}
+        if 'x' not in lower or 'y' not in lower:
+            raise ValueError(f"metadata['experiment']['{name}'] has no x and y")
+        xy = np.array([float(lower['x']), float(lower['y'])])
+    else:
+        listed = _as_list(value)
+        if listed is None or len(listed) < 2:
+            raise ValueError(f"metadata['experiment']['{name}'] must be [x, y, ...] "
+                             "or {'x': ..., 'y': ...} in metres")
+        xy = np.array(listed[:2])
+    if not np.isfinite(xy).all():
+        raise ValueError(f"metadata['experiment']['{name}'] is not a finite position: {xy}")
+    return xy
+
+
+def get_pixel_size_m(dataset: sidpy.Dataset) -> np.ndarray:
+    """Pixel size of an image along its rows and columns, in metres
+
+    Read from the spacing of the two spatial dimensions of the dataset,
+    converted from their units (m, mm, um, nm, Angstrom or pm).
+
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image with two calibrated spatial dimensions
+
+    Returns
+    -------
+    pixel_size: numpy array (2,)
+        metres per pixel along the first (rows) and second (columns) spatial dimension
+    """
+    if not isinstance(dataset, sidpy.Dataset):
+        raise TypeError('We need a sidpy.Dataset')
+    dims = dataset.get_image_dims(return_axis=True)
+    if len(dims) != 2:
+        raise ValueError('need an image with two spatial dimensions')
+    sizes = []
+    for dim in dims:
+        values = np.asarray(dim.values, dtype=np.float64)
+        unit = LENGTH_UNITS_M.get(str(dim.units).strip().lower())
+        if unit is None:
+            raise ValueError(f"dimension {dim.name!r} is in {dim.units!r}, not a unit of length")
+        if len(values) < 2 or values[-1] == values[0]:
+            raise ValueError(f"dimension {dim.name!r} is not calibrated")
+        sizes.append(abs(values[-1] - values[0]) / (len(values) - 1) * unit)
+    return np.array(sizes)
+
+
+def get_image_centre_m(dataset: sidpy.Dataset) -> np.ndarray:
+    """Stage (x, y) of the centre of an image, in metres
+
+    The centre is ``metadata['experiment']['stage_position']`` plus, when
+    recorded, ``metadata['experiment']['image_shift']`` (the beam shift the
+    image was taken with). Both are in metres, given as ``[x, y, ...]`` or as a
+    dict with keys ``x`` and ``y``. asyncroscopy's flat metadata is translated
+    with ``experiment_from_asyncroscopy``.
+
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image whose metadata records where it was taken
+
+    Returns
+    -------
+    centre: numpy array (2,)
+        stage x and y of the image centre in metres
+    """
+    experiment = dataset.metadata.get('experiment', {}) if isinstance(dataset.metadata, dict) else {}
+    if experiment.get('stage_position') is None:
+        raise ValueError("the image does not record metadata['experiment']['stage_position']")
+    centre = _xy(experiment['stage_position'], 'stage_position')
+    if experiment.get('image_shift') is not None:
+        centre = centre + _xy(experiment['image_shift'], 'image_shift')
+    return centre
+
+
+def _image_shape(dataset: sidpy.Dataset) -> typing.Tuple[int, int]:
+    rows, cols = (dataset.shape[k] for k in dataset.get_image_dims())
+    return rows, cols
+
+
+def pixel_to_stage(dataset: sidpy.Dataset, row: float, col: float) -> typing.Tuple[float, float]:
+    """Stage (x, y) in metres of pixel (row, col) of an image
+
+    Rows (the first spatial dimension) run along +y and columns along +x. The
+    image centre is at the position the image records (see
+    ``get_image_centre_m``) and a pixel is the spacing of the spatial dimensions
+    (see ``get_pixel_size_m``). ``stage_to_pixel`` is the inverse.
+
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image with calibrated spatial dimensions and metadata['experiment']['stage_position']
+    row: float
+        index along the first spatial dimension (pixel centres at integers)
+    col: float
+        index along the second spatial dimension
+
+    Returns
+    -------
+    x, y: float
+        stage position in metres
+    """
+    size = get_pixel_size_m(dataset)
+    centre = get_image_centre_m(dataset)
+    rows, cols = _image_shape(dataset)
+    return (float(centre[0] + (col - (cols - 1) / 2.0) * size[1]),
+            float(centre[1] + (row - (rows - 1) / 2.0) * size[0]))
+
+
+def stage_to_pixel(dataset: sidpy.Dataset, x: float, y: float) -> typing.Tuple[float, float]:
+    """Pixel (row, col) of stage position (x, y) on an image; the inverse of ``pixel_to_stage``
+
+    Parameters
+    ----------
+    dataset: sidpy.Dataset
+        image with calibrated spatial dimensions and metadata['experiment']['stage_position']
+    x: float
+        stage x in metres
+    y: float
+        stage y in metres
+
+    Returns
+    -------
+    row, col: float
+        fractional pixel indices (outside the image when the position is)
+    """
+    size = get_pixel_size_m(dataset)
+    centre = get_image_centre_m(dataset)
+    rows, cols = _image_shape(dataset)
+    return (float((y - centre[1]) / size[0] + (rows - 1) / 2.0),
+            float((x - centre[0]) / size[1] + (cols - 1) / 2.0))

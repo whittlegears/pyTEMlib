@@ -7,7 +7,7 @@ move between Tiled and this server directly.
 
 Memory: ``assemble_map`` reads the run's tiles lazily in chunks through a
 bounded cache and writes the pyramid block by block as the stitcher makes it
-(see ``mosaic.assemble`` and ``map_store``), so its memory does not grow
+(see ``image_mosaic.assemble`` and ``map_store``), so its memory does not grow
 with the map. ``max_canvas_pixels`` (default 400 gigapixels;
 ``--max-canvas-megapixels``) only guards against a run whose metadata is
 wrong; stitch part of a run with ``box_m`` to get a result sooner.
@@ -15,7 +15,7 @@ wrong; stitch part of a run with ``box_m`` to get a result sooner.
 Stitching accuracy: the search for each overlap is bounded by the stage's
 stated uncertainty (``stage_sigma_m``) plus the most the sample can drift
 between the two tiles (``max_drift_m_per_s``), and a drift over time is fitted
-with the tile positions (``mosaic.register_tiles``). The map's metadata
+with the tile positions (``image_mosaic.register_tiles``). The map's metadata
 records the fitted drift, the residuals of the matches used and the tiles
 that fell back to their stage position.
 
@@ -42,7 +42,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as MCPImage
 
 from pyTEMlib.version import __version__
-from pyTEMlib.image_tools.mosaic import assemble, level_shapes, pyramid_levels, register_tiles, stage_canvas_shape
+from pyTEMlib.image_tools.image_mosaic import assemble, level_shapes, pyramid_levels, register_tiles, stage_canvas_shape, stitch_quality
 from pyTEMlib.scoring import available_scorers, score_windows
 
 from .jobs import JobRunner
@@ -54,7 +54,6 @@ PROGRESS_STEPS = 1000  # assemble_map reports progress in these units
 DEFAULT_MAX_CANVAS_PIXELS = 400_000_000_000  # level-0 pixels; memory is bounded, so this only catches wrong metadata
 SCORE_MAX_SIDE = 4096  # score_map reads the finest level no larger than this, never a giant level 0 whole
 BLOCK = 512  # pyramid block and chunk side
-UNPLACED_LISTED = 1000  # unplaced tile indices kept in a map's metadata (the count is always there)
 
 # FastMCP app -> the MapTools whose tools it serves; guards against registering the tools twice.
 _REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
@@ -109,38 +108,6 @@ def inputs_sha256(plan: dict, info, stage_sigma_m: float) -> str:
     digest = hashlib.sha256(json.dumps({**settings, "stage_sigma_m": float(stage_sigma_m), "pytemlib": __version__}, sort_keys=True).encode())
     digest.update(np.ascontiguousarray(np.asarray(info.index, dtype=np.int64)).tobytes())
     return digest.hexdigest()
-
-
-def stitch_quality(placement) -> dict:
-    """How well the tiles agree after the solve, for the map's metadata and the job summary."""
-    used = [m for m in placement.matches if m.used]
-    out = {"matches_used": len(used), "matches_found": len(placement.matches)}
-    if used:
-        i = np.array([m.i for m in used])
-        j = np.array([m.j for m in used])
-        offsets = np.array([m.offset_px for m in used])
-        p, s = placement.positions_px, placement.stage_positions_px
-        # Matches are measured in the tiles' own pixels: compare them with the drawn positions taken back there.
-        residuals = np.hypot(*(((p[j] - p[i]) @ np.asarray(placement.linear).T) - (s[j] - s[i] + offsets)).T)
-        out["median_residual_px"] = round(float(np.median(residuals)), 3)
-        out["p95_residual_px"] = round(float(np.percentile(residuals, 95)), 3)
-    if placement.fallback is not None:
-        out["fallback_tiles"] = int(placement.fallback.sum())  # unplaced: listed, not drawn
-        out["unplaced_tiles"] = [int(k) for k in np.nonzero(placement.fallback)[0][:UNPLACED_LISTED]]
-    if placement.linear_estimate is not None:
-        out["scan_linear"] = {
-            "applied": not np.allclose(placement.linear, np.eye(2)),
-            "matrix": np.round(placement.linear_estimate, 6).tolist(),
-            "stderr": np.round(placement.linear_stderr, 6).tolist(),
-        }
-    if placement.gains is not None:
-        out["tile_gain"] = {"min": round(float(placement.gains.min()), 4), "max": round(float(placement.gains.max()), 4)}
-    if placement.solver:
-        out["solver"] = placement.solver
-    drift = placement.drift_summary()
-    if drift is not None:
-        out["drift"] = drift
-    return out
 
 
 class MapTools:

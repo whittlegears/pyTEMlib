@@ -564,7 +564,7 @@ class MapStore:
 
     # -------------------------------------------------------------- maps
     def map_writer(self, run: str):
-        """A LevelWriter for a new map version of ``run`` (see mosaic.assemble); pass it to ``write_map`` when assembled.
+        """A LevelWriter for a new map version of ``run`` (see image_mosaic.assemble); pass it to ``write_map`` when assembled.
 
         Earlier versions of the run's map are never touched.
         """

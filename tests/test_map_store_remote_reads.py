@@ -6,11 +6,11 @@ import h5py
 import numpy as np
 import pytest
 
-from pyTEMlib.image_tools import mosaic
+from pyTEMlib.image_tools import image_mosaic as mosaic
 from pyTEMlib.mcp_server import map_store
 from pyTEMlib.mcp_server.map_store import MapStore
 
-from .test_mosaic import PIXEL, TILE, make_tiles
+from .conftest import PIXEL, TILE, make_tiles
 
 
 def write_layout2(path, grid=3, tiles=None):

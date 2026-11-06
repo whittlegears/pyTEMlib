@@ -23,7 +23,7 @@ import time
 import numpy as np
 import psutil
 
-from pyTEMlib.image_tools import mosaic
+from pyTEMlib.image_tools import image_mosaic as mosaic
 
 
 def synthetic(side: int, tile: int, overlap: float, stage_noise_px: float, drift_px_per_tile: float, match_noise_px: float, seed: int):

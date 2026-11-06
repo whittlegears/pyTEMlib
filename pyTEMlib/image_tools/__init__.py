@@ -32,6 +32,7 @@ from .image_main import LineSelector, get_profile, get_line_selection_points_int
 from .image_main import get_line_selection_points, get_line_profile, histogram_plot
 from .image_main import calculate_ctf, calculate_scherzer, get_rotation, calibrate_image_scale 
 from .image_main import align_crystal_reflections
+from .image_mosaic import Tile, register_tiles, assemble, stitch_mosaic, stitch_quality
 
 
 __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_correction',
@@ -46,4 +47,5 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'LineSelector', 'get_profile', 'get_line_selection_points_interpolated', 
            'get_line_selection_points', 'get_line_profile', 'histogram_plot', 'calculate_ctf', 
            'calculate_scherzer', 'get_rotation', 'calibrate_image_scale', 
-           'align_crystal_reflections']
+           'align_crystal_reflections',
+           'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality']

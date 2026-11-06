@@ -28,7 +28,7 @@ from functools import lru_cache
 import numpy as np
 import psutil
 
-from pyTEMlib.image_tools.mosaic import Tile, assemble, bounded_shift, register_tiles
+from pyTEMlib.image_tools.image_mosaic import Tile, assemble, bounded_shift, register_tiles
 
 PIXEL = 1e-9
 
@@ -120,7 +120,7 @@ class LazyTile:
 
 
 def mosaic_pairs(placement, run):
-    from pyTEMlib.image_tools.mosaic import overlapping_pairs
+    from pyTEMlib.image_tools.image_mosaic import overlapping_pairs
 
     return overlapping_pairs(placement.stage_positions_px, np.full((len(run), 2), run.tile), 16)
 

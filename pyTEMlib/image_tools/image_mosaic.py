@@ -37,8 +37,17 @@ So placement starts from each tile's reported stage position and refines it:
    overlaps cross-fade. Each pyramid level's block is made from the four blocks
    below it as soon as they are done. Peak memory is a few blocks per level,
    whatever the map size; tiles are read through the sequence passed in, so a
-   lazy sequence (see pyTEMlib.mcp_server.map_store) keeps them out of memory
-   too.
+   lazy sequence keeps them out of memory too.
+
+``stitch_mosaic`` does all three for a list of sidpy datasets and returns the
+map as a calibrated sidpy dataset. ``register_tiles`` and ``assemble`` are the
+lower-level steps, for maps too large to hold in memory. They take any
+sequence of tiles: ``len(tiles)`` and ``tiles[k]`` giving an object with
+``image`` (2-D array, read when used), ``stage_xy_m``, ``pixel_size_m``,
+``acquired_s`` (or None) and ``shape``, as ``Tile`` has. A sequence may also
+have ``arrays()``, returning the dict ``tile_arrays`` would make, so placement
+reads no tile object at all; a lazy sequence that reads images from a file
+on demand is the intended use.
 
 Coordinates: images are [row, column] with rows along +y and columns along
 +x; stage positions are (x, y) in metres and mark the tile centre.
@@ -46,14 +55,19 @@ Coordinates: images are [row, column] with rows along +y and columns along
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
 import numpy as np
+import scipy.fft
 from scipy import ndimage, sparse
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import lsqr, spsolve
-from skimage.registration._masked_phase_cross_correlation import cross_correlate_masked
+
+import sidpy
+
+from .image_utilities import get_image_centre_m, get_pixel_size_m
 
 # No stage reports positions better than about a pixel at survey magnification (readout, scan
 # distortion); a smaller sigma would make the prior rigid and leave no room to measure drift.
@@ -81,10 +95,20 @@ LINEAR_MIN_EFFECT_PX = 0.1  # the scan's shared distortion is removed only when 
 WHOLE_PIXEL_PX = 0.01  # a tile this close to a whole-pixel position is copied rather than resampled
 SPLINE_MARGIN_PX = 12  # tile pixels kept around the part a block needs; the cubic spline's reach decays well within it
 STRIP_PX = 8192  # pairs are matched in vertical strips this wide, so the tiles read stay few (see pairwise_offsets)
+FLOAT_CACHE_BYTES = 256 * 2**20  # float64 tiles kept while matching pairs (the current and previous row of a strip)
+UNPLACED_LISTED = 1000  # unplaced tile indices listed by stitch_quality (the count is always there)
 
 
 @dataclass
 class Tile:
+    """One image of a map: its pixels and where the stage put it.
+
+    ``stage_xy_m`` is the stage (x, y) of the tile centre in metres,
+    ``pixel_size_m`` the (square) pixel size in metres and ``acquired_s`` when
+    the tile was taken, in seconds on any clock shared by the map's tiles (it
+    enables the drift model; None leaves it off).
+    """
+
     image: np.ndarray
     stage_xy_m: tuple[float, float]
     pixel_size_m: float
@@ -95,6 +119,42 @@ class Tile:
     @property
     def shape(self) -> tuple[int, int]:
         return tuple(self.image.shape[:2])
+
+    @classmethod
+    def from_dataset(cls, dataset: sidpy.Dataset, index: int = 0) -> "Tile":
+        """A tile from an image dataset
+
+        The pixel size is read from the spacing of the two spatial dimensions
+        (converted to metres from their units; rows and columns must agree).
+        The tile centre is ``metadata['experiment']['stage_position']`` (``[x, y, ...]``
+        or ``{'x': ..., 'y': ...}``, metres) plus ``metadata['experiment']['image_shift']``
+        when recorded (see ``image_utilities.get_image_centre_m``). The
+        acquisition time, which enables the drift model, is
+        ``metadata['experiment']['acquired_s']`` (seconds) when present.
+
+        Parameters
+        ----------
+        dataset: sidpy.Dataset
+            image (data_type IMAGE) with calibrated spatial dimensions
+        index: int
+            the tile's index in its map
+
+        Returns
+        -------
+        tile: Tile
+        """
+        if not isinstance(dataset, sidpy.Dataset):
+            raise TypeError('We need a sidpy.Dataset')
+        if dataset.data_type.name != 'IMAGE':
+            raise TypeError('We need sidpy.Dataset of sidpy.Datatype: IMAGE')
+        size = get_pixel_size_m(dataset)
+        if abs(size[0] - size[1]) > 1e-6 * size[0]:
+            raise ValueError(f'tiles need square pixels; this one is {size[0]:.4g} x {size[1]:.4g} m')
+        centre = get_image_centre_m(dataset)
+        experiment = dataset.metadata.get('experiment', {})
+        acquired = experiment.get('acquired_s')
+        return cls(np.asarray(dataset), (float(centre[0]), float(centre[1])), float(size[0]), index=int(index),
+                   attrs={'title': dataset.title}, acquired_s=None if acquired is None else float(acquired))
 
 
 @dataclass
@@ -258,6 +318,59 @@ def _overlap_ncc(a: np.ndarray, b: np.ndarray, rel: np.ndarray, min_overlap_px: 
     return _ncc(a[r0:r1, c0:c1], b[r0 - dr : r1 - dr, c0 - dc : c1 - dc])
 
 
+def _cross_correlate_masked(fixed: np.ndarray, moving: np.ndarray, overlap_ratio: float) -> np.ndarray:
+    """Normalised cross-correlation of two 2-D images over their overlap at every shift ('full' mode).
+
+    Adapted from ``cross_correlate_masked`` in scikit-image 0.26
+    (skimage/registration/_masked_phase_cross_correlation.py, BSD-3-Clause,
+    Copyright (C) 2019, the scikit-image team), which implements D. Padfield,
+    "Masked object registration in the Fourier domain", IEEE Trans. Image
+    Process. 21(5), 2706-2718 (2012), doi:10.1109/TIP.2011.2181402. Reduced to
+    2-D float64 images whose every pixel is valid (the masks are all ones), in
+    'full' mode. scikit-image exposes the correlation map only through a private
+    module; the public ``phase_cross_correlation`` returns just its global peak,
+    and the peak here must be searched inside a bound.
+
+    Index k of the result is the shift (fixed.shape - 1 - k) of ``moving``
+    relative to ``fixed``; shifts whose overlap is under ``overlap_ratio`` of the
+    largest overlap are set to 0.
+    """
+    fixed = np.asarray(fixed, dtype=np.float64)
+    moving = np.asarray(moving, dtype=np.float64)
+    eps = np.finfo(np.float64).eps
+    final_shape = tuple(fixed.shape[k] + moving.shape[k] - 1 for k in range(2))
+    fast_shape = tuple(scipy.fft.next_fast_len(n) for n in final_shape)
+
+    def fft(x):
+        return scipy.fft.fftn(x, s=fast_shape, axes=(0, 1))
+
+    def ifft(x):
+        return scipy.fft.ifftn(x, s=fast_shape, axes=(0, 1)).real
+
+    rotated_moving = moving[::-1, ::-1]
+    fixed_fft = fft(fixed)
+    rotated_moving_fft = fft(rotated_moving)
+    fixed_mask_fft = fft(np.ones(fixed.shape))
+    rotated_moving_mask_fft = fft(np.ones(moving.shape))
+
+    overlap_px = np.fmax(np.round(ifft(rotated_moving_mask_fft * fixed_mask_fft)), eps)
+    masked_fixed = ifft(rotated_moving_mask_fft * fixed_fft)
+    masked_moving = ifft(fixed_mask_fft * rotated_moving_fft)
+    numerator = ifft(rotated_moving_fft * fixed_fft) - masked_fixed * masked_moving / overlap_px
+    fixed_denom = np.fmax(ifft(rotated_moving_mask_fft * fft(np.square(fixed))) - np.square(masked_fixed) / overlap_px, 0.0)
+    moving_denom = np.fmax(ifft(fixed_mask_fft * fft(np.square(rotated_moving))) - np.square(masked_moving) / overlap_px, 0.0)
+    denom = np.sqrt(fixed_denom * moving_denom)
+
+    final = (slice(0, final_shape[0]), slice(0, final_shape[1]))
+    numerator, denom, overlap_px = numerator[final], denom[final], overlap_px[final]
+    out = np.zeros_like(denom)
+    valid = denom > 1e3 * eps * np.max(np.abs(denom))
+    out[valid] = numerator[valid] / denom[valid]
+    np.clip(out, -1.0, 1.0, out=out)
+    out[overlap_px < overlap_ratio * np.max(overlap_px)] = 0.0
+    return out
+
+
 def bounded_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px: float, overlap_ratio: float) -> np.ndarray | None:
     """Position of b relative to a (row, col), searched only within ``bound_px`` of ``predicted``.
 
@@ -265,7 +378,7 @@ def bounded_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px:
     the peak taken inside the bound and refined to subpixel by a parabola. A
     peak on the edge of the bound means the true one may lie outside it: None.
     """
-    xcorr = cross_correlate_masked(b, a, np.ones(b.shape, bool), np.ones(a.shape, bool), axes=(0, 1), mode="full", overlap_ratio=overlap_ratio)
+    xcorr = _cross_correlate_masked(b, a, overlap_ratio)
     # Index k of xcorr is the shift (shape - 1 - k) of b relative to a.
     centre = np.array(a.shape, dtype=np.float64) - 1.0 - np.asarray(predicted, dtype=np.float64)
     lo = np.maximum(np.floor(centre - bound_px).astype(int), 0)
@@ -391,12 +504,28 @@ def pairwise_offsets(
     times = _times(tiles)
     sigma = max(stage_sigma_px, MIN_STAGE_SIGMA_PX) if stage_sigma_px is not None else 0.1 * float(np.median(shapes))
     matches: list[PairMatch] = []
+    # A tile is in up to eight pairs: its float64 copy and whether it is blank are made once, and
+    # kept (least recently used dropped first) while the pairs of its strip and row are matched.
+    floats: OrderedDict[int, tuple[np.ndarray, bool]] = OrderedDict()
+    held = [0]
+
+    def as_float(k: int) -> tuple[np.ndarray, bool]:
+        if k in floats:
+            floats.move_to_end(k)
+            return floats[k]
+        image = np.asarray(tiles[k].image, dtype=np.float64)
+        floats[k] = (image, bool(image.std() > 0))
+        held[0] += image.nbytes
+        while held[0] > FLOAT_CACHE_BYTES and len(floats) > 2:
+            held[0] -= floats.popitem(last=False)[1][0].nbytes
+        return floats[k]
+
     for done, (i, j, height, width) in enumerate(pairs):
         if on_pair is not None:
             on_pair(done, len(pairs))  # may raise to stop registration
-        a = np.asarray(tiles[i].image, dtype=np.float64)
-        b = np.asarray(tiles[j].image, dtype=np.float64)
-        if a.std() == 0 or b.std() == 0:
+        a, a_textured = as_float(i)
+        b, b_textured = as_float(j)
+        if not (a_textured and b_textured):
             continue
         predicted = positions[j] - positions[i]
         if max_correction_px is not None:
@@ -684,17 +813,36 @@ def register_tiles(
     drift_knot_s: float = 120.0,
     scan_linear: np.ndarray | None = None,
 ) -> Placement:
-    """Place tiles by stage position, then refine with bounded image matching and (with times) a drift model.
+    """Place tiles by stage position, then refine with bounded image matching and (with times) a drift model
 
-    ``stage_sigma_m``: 1-sigma error of the reported stage positions (sets the
-    search bound and the prior). ``max_drift_m_per_s``: the most the sample
-    drifts relative to the stage; 0 turns the drift model off. Tiles need
-    ``acquired_s`` for the drift model. ``scan_linear``: a calibration of the
-    scan's shared stretch, turn and shear (the 2 x 2 map from stage pixels to
-    tile pixels, as ``Placement.linear_estimate`` reports it), measured once
-    for this scan setting, for example on a large map; it is applied as given.
-    Without it the map measures its own, which only a large map can do: the
-    stage's error hides a 1 % scale error on a few dozen tiles.
+    Parameters
+    ----------
+    tiles: sequence of Tile
+        the map's tiles (any sequence of tile-like objects; see the module docstring)
+    stage_sigma_m: float
+        1-sigma error of the reported stage positions in metres; sets the search bound and the prior
+    min_confidence: float
+        normalised cross-correlation a pair's overlap must reach to count as a match
+    refine: bool
+        False places the tiles by stage position alone
+    on_pair: callable or None
+        ``on_pair(done, total)`` is called as pairs are matched; it may raise to stop
+    max_drift_m_per_s: float
+        the most the sample drifts relative to the stage; 0 turns the drift model off.
+        Tiles need ``acquired_s`` for the drift model.
+    drift_knot_s: float
+        the drift is piecewise linear in time with one knot per this many seconds
+    scan_linear: numpy array (2, 2) or None
+        a calibration of the scan's shared stretch, turn and shear (the map from stage
+        pixels to tile pixels, as ``Placement.linear_estimate`` reports it), measured once
+        for this scan setting, for example on a large map; it is applied as given. Without
+        it the map measures its own, which only a large map can do: the stage's error
+        hides a 1 % scale error on a few dozen tiles.
+
+    Returns
+    -------
+    placement: Placement
+        tile positions on the canvas, the matches, the fitted drift, scan distortion and tile gains
     """
     stage_px, pixel, origin = place_by_stage(tiles)
     sigma_px = stage_sigma_m / pixel
@@ -937,13 +1085,34 @@ def assemble(
     dtype=None,
     on_block: Callable[[int, int], None] | None = None,
 ) -> int:
-    """Blend tiles onto the canvas and write every pyramid level to ``writer``, block by block.
+    """Blend tiles onto the canvas and write every pyramid level to ``writer``, block by block
 
     Level-0 blocks blend only the tiles that touch them (found with a grid
     index); a level-k block is the 2 x 2 average of its four level-(k-1)
     blocks, made right after them (quadtree order), so peak memory is a few
-    blocks per level. ``on_block(done, total)`` may raise to stop. Returns the
-    number of levels written.
+    blocks per level.
+
+    Parameters
+    ----------
+    tiles: sequence of Tile
+        the tiles that were placed
+    placement: Placement
+        the result of ``register_tiles``
+    writer: LevelWriter
+        receives each level's blocks (``ArrayWriter`` keeps them in memory)
+    block: int
+        block side in pixels
+    levels: int or None
+        pyramid levels to write; None halves down to about 256 pixels
+    dtype: numpy dtype or None
+        of the written levels; None keeps the tiles' type
+    on_block: callable or None
+        ``on_block(done, total)`` is called after each block; it may raise to stop
+
+    Returns
+    -------
+    levels: int
+        number of levels written
     """
     shapes = level_shapes(placement.canvas_shape, levels or pyramid_levels(placement.canvas_shape))
     levels = len(shapes)
@@ -1080,3 +1249,129 @@ def stitch_to_arrays(tiles: Sequence[Tile], placement: Placement | None = None, 
     writer = ArrayWriter()
     assemble(tiles, placement, writer, **kwargs)
     return writer.levels, placement
+
+
+def stitch_quality(placement: Placement) -> dict:
+    """How well the tiles agree after the solve
+
+    Parameters
+    ----------
+    placement: Placement
+        the result of ``register_tiles``
+
+    Returns
+    -------
+    quality: dict
+        ``matches_used`` and ``matches_found``; with matches, the median and 95th percentile
+        residual of the used matches in pixels; ``fallback_tiles`` (unplaced, drawn only
+        where no placed tile is) and the first UNPLACED_LISTED ``unplaced_tiles``; the
+        measured ``scan_linear`` and whether it was applied; the range of ``tile_gain``;
+        the ``solver`` record; and the fitted ``drift`` in metres when there was one
+    """
+    used = [m for m in placement.matches if m.used]
+    out = {"matches_used": len(used), "matches_found": len(placement.matches)}
+    if used:
+        i = np.array([m.i for m in used])
+        j = np.array([m.j for m in used])
+        offsets = np.array([m.offset_px for m in used])
+        p, s = placement.positions_px, placement.stage_positions_px
+        # Matches are measured in the tiles' own pixels: compare them with the drawn positions taken back there.
+        residuals = np.hypot(*(((p[j] - p[i]) @ np.asarray(placement.linear).T) - (s[j] - s[i] + offsets)).T)
+        out["median_residual_px"] = round(float(np.median(residuals)), 3)
+        out["p95_residual_px"] = round(float(np.percentile(residuals, 95)), 3)
+    if placement.fallback is not None:
+        out["fallback_tiles"] = int(placement.fallback.sum())  # unplaced: listed, not drawn
+        out["unplaced_tiles"] = [int(k) for k in np.nonzero(placement.fallback)[0][:UNPLACED_LISTED]]
+    if placement.linear_estimate is not None:
+        out["scan_linear"] = {
+            "applied": not np.allclose(placement.linear, np.eye(2)),
+            "matrix": np.round(placement.linear_estimate, 6).tolist(),
+            "stderr": np.round(placement.linear_stderr, 6).tolist(),
+        }
+    if placement.gains is not None:
+        out["tile_gain"] = {"min": round(float(placement.gains.min()), 4), "max": round(float(placement.gains.max()), 4)}
+    if placement.solver:
+        out["solver"] = placement.solver
+    drift = placement.drift_summary()
+    if drift is not None:
+        out["drift"] = drift
+    return out
+
+
+def stitch_mosaic(datasets: Sequence[sidpy.Dataset], stage_sigma_m: float = 200e-9, refine: bool = True,
+                  max_drift_m_per_s: float = 0.0, drift_knot_s: float = 120.0,
+                  scan_linear: np.ndarray | None = None) -> sidpy.Dataset:
+    """Stitch overlapping images into one calibrated map
+
+    Each image is placed at the stage position it records, then the overlaps
+    are matched within the stage's error and all positions solved together
+    (see ``register_tiles``), and the images are blended onto one canvas
+    (see ``assemble``). Images need square pixels of one size, read from their
+    spatial dimensions, and ``metadata['experiment']['stage_position']``
+    (``[x, y, ...]`` or ``{'x': ..., 'y': ...}`` in metres, the image centre);
+    ``metadata['experiment']['acquired_s']`` (seconds) enables the drift model.
+    See ``Tile.from_dataset``.
+
+    Parameters
+    ----------
+    datasets: list of sidpy.Dataset
+        images (data_type IMAGE) of one map
+    stage_sigma_m: float
+        1-sigma error of the recorded stage positions in metres
+    refine: bool
+        False places the images by stage position alone
+    max_drift_m_per_s: float
+        the most the sample drifts relative to the stage; 0 turns the drift model off
+    drift_knot_s: float
+        one drift knot per this many seconds
+    scan_linear: numpy array (2, 2) or None
+        a known calibration of the scan's shared distortion (see ``register_tiles``)
+
+    Returns
+    -------
+    mosaic: sidpy.Dataset
+        the map (data_type IMAGE), with spatial dimensions ``y`` (rows) and ``x``
+        (columns) in nm from its top-left pixel, and
+        ``metadata['experiment']['stage_position']`` the stage (x, y) of its centre in
+        metres, so ``image_utilities.pixel_to_stage`` works on it as on any image.
+        ``metadata['mosaic']`` holds the placement: ``positions_px`` (top-left
+        (row, col) of each image on the map), ``stage_positions_px``, ``origin_xy_m``
+        (stage x, y of the centre of pixel (0, 0)), ``pixel_size_m``, ``sources`` (the
+        input titles), ``tile_gains``, ``tile_offsets`` (drawn = gain * counts + offset),
+        ``scan_linear_applied`` and the ``stitch_quality`` entries.
+    """
+    if len(datasets) == 0:
+        raise ValueError('no images to stitch')
+    tiles = [Tile.from_dataset(dataset, index=k) for k, dataset in enumerate(datasets)]
+    placement = register_tiles(tiles, stage_sigma_m=stage_sigma_m, refine=refine, max_drift_m_per_s=max_drift_m_per_s,
+                               drift_knot_s=drift_knot_s, scan_linear=scan_linear)
+    writer = ArrayWriter()
+    assemble(tiles, placement, writer, levels=1)
+    canvas = writer.levels[0]
+    pixel_nm = placement.pixel_size_m * 1e9
+
+    mosaic = sidpy.Dataset.from_array(canvas, title='Stitched mosaic')
+    mosaic.data_type = 'IMAGE'
+    mosaic.quantity = datasets[0].quantity
+    mosaic.units = datasets[0].units
+    mosaic.source = datasets[0].title
+    mosaic.set_dimension(0, sidpy.Dimension(np.arange(canvas.shape[0]) * pixel_nm, name='y', units='nm',
+                                            quantity='Length', dimension_type='spatial'))
+    mosaic.set_dimension(1, sidpy.Dimension(np.arange(canvas.shape[1]) * pixel_nm, name='x', units='nm',
+                                            quantity='Length', dimension_type='spatial'))
+    experiment = {k: v for k, v in dict(datasets[0].metadata.get('experiment', {})).items()
+                  if k not in ('stage_position', 'image_shift', 'acquired_s')}
+    experiment['stage_position'] = list(placement.pixel_to_stage((canvas.shape[0] - 1) / 2.0, (canvas.shape[1] - 1) / 2.0))
+    mosaic.metadata['experiment'] = experiment
+    mosaic.metadata['mosaic'] = {
+        'positions_px': placement.positions_px.tolist(),
+        'stage_positions_px': placement.stage_positions_px.tolist(),
+        'origin_xy_m': list(placement.origin_xy_m),
+        'pixel_size_m': placement.pixel_size_m,
+        'sources': [dataset.title for dataset in datasets],
+        'tile_gains': None if placement.gains is None else placement.gains.tolist(),
+        'tile_offsets': None if placement.offsets is None else placement.offsets.tolist(),
+        'scan_linear_applied': np.asarray(placement.linear).tolist(),
+        **stitch_quality(placement),
+    }
+    return mosaic

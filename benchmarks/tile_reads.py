@@ -20,7 +20,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from pyTEMlib.image_tools import mosaic
+from pyTEMlib.image_tools import image_mosaic as mosaic
 from pyTEMlib.mcp_server import map_store
 from pyTEMlib.mcp_server.map_store import MapStore
 
