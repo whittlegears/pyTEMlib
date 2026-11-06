@@ -101,12 +101,23 @@ UNPLACED_LISTED = 1000  # unplaced tile indices listed by stitch_quality (the co
 
 @dataclass
 class Tile:
-    """One image of a map: its pixels and where the stage put it.
+    """One image of a map: its pixels and where the stage put it
 
-    ``stage_xy_m`` is the stage (x, y) of the tile centre in metres,
-    ``pixel_size_m`` the (square) pixel size in metres and ``acquired_s`` when
-    the tile was taken, in seconds on any clock shared by the map's tiles (it
-    enables the drift model; None leaves it off).
+    Attributes
+    ----------
+    image: numpy array (2D)
+        the tile's pixels, [row, column]
+    stage_xy_m: (float, float)
+        stage (x, y) of the tile centre in metres
+    pixel_size_m: float
+        the (square) pixel size in metres
+    index: int
+        the tile's index in its map
+    attrs: dict
+        anything else to carry along
+    acquired_s: float or None
+        when the tile was taken, in seconds on a clock shared by the map's tiles;
+        enables the drift model (None leaves it off)
     """
 
     image: np.ndarray

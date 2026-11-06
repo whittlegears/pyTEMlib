@@ -338,11 +338,32 @@ AMBIGUITY_EXCLUDE_PX = 2  # a rival peak must be further than this (parent pixel
 
 @dataclass
 class ChildPlacement:
-    """Where a child image sits in its parent image, or why it could not be placed.
+    """Where a child image sits in its parent image, or why it could not be placed
 
     Shaped like an OME-NGFF coordinate transform (scale, rotation, translation). The translation is
     measured; the scale and rotation between the two images come from their pixel sizes and the
     scan rotation given, and are recorded as given. Callers add where the parent came from.
+
+    Attributes
+    ----------
+    status: str
+        "placed" or "unplaced"
+    translation_px: list of float or None
+        (row, col) of the child's centre in parent pixels, when placed
+    scale: float
+        parent pixels per child pixel
+    rotation_rad: float
+        the child's scan rotation relative to the parent's, as given
+    score: float or None
+        normalised cross-correlation at the peak (low on faint images even when right)
+    ambiguity: float or None
+        best rival peak / best peak
+    uncertainty_px: list of float or None
+        rough 1-sigma of the translation, from the peak's sharpness
+    reason: str
+        why the child was not placed
+    method, method_version, inputs_sha256: str
+        how the placement was made, and a hash of both images
     """
 
     status: str  # "placed" or "unplaced"

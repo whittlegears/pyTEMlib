@@ -129,7 +129,20 @@ class Scorer(typing.Protocol):
 
 
 class BaselineScorer:
-    """In-focus feature edges: per-feature edge sharpness times edge contrast (see the module docstring)."""
+    """In-focus feature edges: per-feature edge sharpness times edge contrast (see the module docstring)
+
+    ``score(region, metadata)`` returns (value in [0, 1], reason); ``measure(region)`` returns the edge
+    measurements behind it.
+
+    Attributes
+    ----------
+    name: str
+        "baseline"
+    version: str
+        "3.0.0"
+    description: str
+        what it rewards
+    """
 
     name = "baseline"
     version = "3.0.0"
