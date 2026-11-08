@@ -246,7 +246,8 @@ def score_windows(dataset: sidpy.Dataset, scorer: typing.Optional[Scorer] = None
     window: int
         window side in pixels (shrunk to the image when the image is smaller)
     stride: int or None
-        step between windows in pixels; defaults to the window (no overlap)
+        step between windows in pixels; defaults to the window (no overlap). Windows stay wholly
+        inside the image, so a strip at the far edges narrower than a stride is not scored
 
     Returns
     -------

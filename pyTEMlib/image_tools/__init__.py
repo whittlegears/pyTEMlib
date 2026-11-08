@@ -26,7 +26,7 @@ from .image_graph import find_polyhedra, breadth_first_search, breadth_first_sea
 from .image_graph import get_base_atoms, circum_center
 from .image_distortion import get_distortion_matrix, undistort, undistort_sitk
 from .image_registration import complete_registration, rigid_registration, demon_registration
-from .image_registration import register_to_parent, ChildPlacement
+from .image_registration import register_to_parent, ChildPlacement, simulate_parent_view
 from .image_scoring import Scorer, BaselineScorer, score_windows, select_regions
 from .image_fft import power_spectrum, diffractogram_spots, adaptive_fourier_filter
 from .image_fft import rotational_symmetry_diffractogram
@@ -37,7 +37,7 @@ from .image_main import get_line_selection_points, get_line_profile, histogram_p
 from .image_main import calculate_ctf, calculate_scherzer, get_rotation, calibrate_image_scale 
 from .image_main import align_crystal_reflections
 from .image_mosaic import Tile, register_tiles, assemble, stitch_mosaic, stitch_quality
-from .image_mosaic import stage_canvas_shape, pyramid_levels, level_shapes
+from .image_mosaic import stage_canvas_shape, pyramid_levels, level_shapes, ArrayWriter
 
 
 __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_correction',
@@ -54,8 +54,8 @@ __all__ = ['ImageWindowing', 'crop_image', 'decon_lr', 'clean_svd', 'background_
            'calculate_scherzer', 'get_rotation', 'calibrate_image_scale', 
            'align_crystal_reflections', 'circum_center',
            'Tile', 'register_tiles', 'assemble', 'stitch_mosaic', 'stitch_quality',
-           'stage_canvas_shape', 'pyramid_levels', 'level_shapes',
-           'register_to_parent', 'ChildPlacement',
+           'stage_canvas_shape', 'pyramid_levels', 'level_shapes', 'ArrayWriter',
+           'register_to_parent', 'ChildPlacement', 'simulate_parent_view',
            'Scorer', 'BaselineScorer', 'score_windows', 'select_regions', 'find_blobs',
            'get_pixel_size_m', 'get_image_centre_m', 'pixel_to_stage', 'stage_to_pixel',
            'experiment_from_asyncroscopy']

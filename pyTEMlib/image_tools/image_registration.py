@@ -353,7 +353,7 @@ class ChildPlacement:
     scale: float
         parent pixels per child pixel
     rotation_rad: float
-        the child's scan rotation relative to the parent's, as given
+        the child's scan rotation relative to the parent's in radians, as given (``register_to_parent`` states the sign)
     score: float or None
         normalised cross-correlation at the peak (low on faint images even when right)
     ambiguity: float or None
@@ -395,7 +395,9 @@ def simulate_parent_view(child: np.ndarray, scale: float, rotation_rad: float = 
     scale: float
         parent pixels per child pixel (child pixel size / parent pixel size), between 0 and 1
     rotation_rad: float
-        the child's scan rotation relative to the parent's
+        the child's scan rotation relative to the parent's, in radians; for a parent offset (r, c) from
+        the centre the child is sampled at (cos a * r + sin a * c, -sin a * r + cos a * c), so positive
+        turns the child's row axis toward the parent's +column axis
     probe_px: float
         the parent's probe size (Gaussian sigma) in parent pixels
 
@@ -456,7 +458,9 @@ def register_to_parent(child: sidpy.Dataset, parent: sidpy.Dataset, predicted_px
     window_px: float
         how far from the prediction to search, in parent pixels
     rotation_rad: float
-        the child's scan rotation relative to the parent's
+        the child's scan rotation relative to the parent's, in radians; for a parent offset (r, c) from
+        the centre the child is sampled at (cos a * r + sin a * c, -sin a * r + cos a * c), so positive
+        turns the child's row axis toward the parent's +column axis
     probe_px: float
         the parent's probe size (Gaussian sigma) in parent pixels
     min_score: float
@@ -471,6 +475,14 @@ def register_to_parent(child: sidpy.Dataset, parent: sidpy.Dataset, predicted_px
     placement: ChildPlacement
         status "placed" with the translation (the child's centre in parent pixels), score, ambiguity and
         uncertainty, or "unplaced" with the reason
+
+    Raises
+    ------
+    TypeError
+        when either image is not a sidpy.Dataset
+    ValueError
+        when either image has non-square pixels or uncalibrated spatial dimensions. A placement that
+        cannot be made is not an error: it returns "unplaced".
     """
     child_pixel_m = _square_pixel_m(child, 'child')
     parent_pixel_m = _square_pixel_m(parent, 'parent')

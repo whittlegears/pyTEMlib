@@ -116,8 +116,8 @@ class Tile:
     attrs: dict
         anything else to carry along
     acquired_s: float or None
-        when the tile was taken, in seconds on a clock shared by the map's tiles;
-        enables the drift model (None leaves it off)
+        when the tile was taken, in seconds on a clock shared by the map's tiles; needed for the
+        drift model, which also needs ``max_drift_m_per_s`` > 0 (None leaves it off)
     """
 
     image: np.ndarray
@@ -125,7 +125,7 @@ class Tile:
     pixel_size_m: float
     index: int = 0
     attrs: dict = field(default_factory=dict)
-    acquired_s: float | None = None  # when the tile was taken; enables the drift model
+    acquired_s: float | None = None  # when the tile was taken; the drift model needs it
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -140,7 +140,7 @@ class Tile:
         The tile centre is ``metadata['experiment']['stage_position']`` (``[x, y, ...]``
         or ``{'x': ..., 'y': ...}``, metres) plus ``metadata['experiment']['image_shift']``
         when recorded (see ``image_utilities.get_image_centre_m``). The
-        acquisition time, which enables the drift model, is
+        acquisition time, which the drift model needs (with ``max_drift_m_per_s`` > 0), is
         ``metadata['experiment']['acquired_s']`` (seconds) when present.
 
         Parameters
@@ -1321,7 +1321,8 @@ def stitch_mosaic(datasets: Sequence[sidpy.Dataset], stage_sigma_m: float = 200e
     (see ``assemble``). Images need square pixels of one size, read from their
     spatial dimensions, and ``metadata['experiment']['stage_position']``
     (``[x, y, ...]`` or ``{'x': ..., 'y': ...}`` in metres, the image centre);
-    ``metadata['experiment']['acquired_s']`` (seconds) enables the drift model.
+    ``metadata['experiment']['acquired_s']`` (seconds) is needed for the drift model,
+    which also needs ``max_drift_m_per_s`` > 0.
     See ``Tile.from_dataset``.
 
     Parameters

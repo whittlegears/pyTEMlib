@@ -1,7 +1,7 @@
 """ Atom detection
 
 All atom detection is done here
-Everything is in unit of pixel!!
+Atom positions are in pixels unless a function says otherwise.
 
 Author: Gerd Duscher
 
@@ -104,7 +104,7 @@ def find_blobs(dataset: sidpy.Dataset, n: int = 5, min_size: typing.Optional[flo
     Blobs are found with a Laplacian of Gaussian (``skimage.feature.blob_log``)
     on the image scaled to its noise. Contrast is a blob's mean above the
     image's median, in units of its noise (the median absolute deviation);
-    blobs under MIN_BLOB_CONTRAST, or not wholly inside the image, are left out.
+    blobs under MIN_BLOB_CONTRAST (3), or not wholly inside the image, are left out.
 
     Parameters
     ----------
