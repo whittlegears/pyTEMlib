@@ -1061,11 +1061,13 @@ def refine_atoms(dataset: str, atoms: list, radius_px: float = 3.0, max_dist_px:
 @tool
 def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 0.0, cs_mm: float = 0.0,
                    fov_nm: float = 4.0, size_px: int = 256, aberrations: Optional[dict] = None,
-                   include_image: bool = False) -> dict:
+                   include_image: bool = False, include_array: bool = False) -> dict:
     """STEM probe intensity from an aberration function and an aperture (pyTEMlib probe_tools.get_probe).
 
     defocus_nm is C10 and cs_mm is C30; further coefficients (C12a, C21a, C50, ... in nm, pyTEMlib's notation) go in
     aberrations. Chromatic aberration is not included: pyTEMlib's chromatic probe (probe_tools.probe2) does not run.
+    include_image adds a PNG; include_array adds the intensity as 'probe_base64', float32, little-endian, row-major,
+    [size_px, size_px], for a viewer that sets its own contrast.
     """
     if voltage_kv <= 0 or aperture_mrad <= 0 or fov_nm <= 0:
         raise AnalysisError('bad_argument', 'voltage_kv, aperture_mrad and fov_nm must be positive')
@@ -1093,6 +1095,8 @@ def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 
               'diffraction_limit_nm': 0.61 * float(utilities.get_wavelength(ab['acceleration_voltage'], 'nm')) / (aperture_mrad / 1000.0)}
     if include_image:
         result['_png'] = to_png(probe, 512)
+    if include_array:
+        result['probe_base64'] = base64.b64encode(np.ascontiguousarray(probe, dtype='<f4').tobytes()).decode('ascii')
     return result
 
 

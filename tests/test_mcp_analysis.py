@@ -526,6 +526,9 @@ def test_an_unaberrated_probe_is_close_to_the_diffraction_limit():
     assert probe['half_intensity_radius_nm'] < probe['diffraction_limit_nm']
     assert probe['_png'][:4] == b'\x89PNG' and png_size(probe['_png']) == (256, 256)
     assert '_png' not in ok(analysis.simulate_probe(200, 30))
+    numbers = ok(analysis.simulate_probe(200, 30, size_px=64, include_array=True))
+    intensity = np.frombuffer(base64.b64decode(numbers['probe_base64']), dtype='<f4').reshape(64, 64)
+    assert np.unravel_index(int(np.argmax(intensity)), intensity.shape) == (32, 32) and intensity.min() >= 0
 
 
 def test_aberrations_spread_the_probe():
