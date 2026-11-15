@@ -142,6 +142,26 @@ def test_a_host_resolver_supplies_datasets_for_its_own_references(tmp_path):
         analysis._resolvers.remove(resolver)
 
 
+def test_a_host_resolver_is_asked_for_the_whole_reference_with_its_key(tmp_path):
+    held = analysis._dataset_from_array(np.zeros((8, 9)), 'held')
+    asked = []
+
+    def resolver(reference):
+        asked.append(reference)
+        if reference == 'run-7#image/haadf':
+            return held
+        if reference == 'run-7#broken':
+            raise analysis.AnalysisError('uncalibrated', 'run-7 broken has no energy scale')
+        return None
+
+    analysis.add_resolver(resolver)
+    try:
+        assert analysis.resolve('run-7#image/haadf') is held and asked[0] == 'run-7#image/haadf'
+        refused(analysis.image_fft('run-7#broken'), 'uncalibrated')
+    finally:
+        analysis._resolvers.remove(resolver)
+
+
 def test_analysis_never_changes_the_cached_dataset():
     before = json.dumps(dict(analysis.resolve(EDS_STO).metadata), sort_keys=True, default=str)
     ok(analysis.eds_quantify(EDS_STO, ['Sr', 'Ti', 'O']))

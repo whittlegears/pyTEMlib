@@ -112,7 +112,9 @@ def add_resolver(resolver: Callable[[str], Any]) -> None:
     """Add a function ``reference -> sidpy.Dataset | {key: sidpy.Dataset} | None`` tried before files.
 
     This is how a host with its own data store (a Tiled catalogue) makes its references work in
-    every tool here. Return None for a reference that is not yours.
+    every tool here. The resolver is asked for the whole reference ("key#path" included) and, when it does not
+    return a single dataset for that, for the part before '#'. Return None for a reference that is not yours, and
+    raise AnalysisError for one that is yours but cannot be analysed.
     """
     _resolvers.append(resolver)
 
@@ -246,7 +248,15 @@ def load_datasets(source: str) -> dict:
 
 
 def resolve(reference: str) -> sidpy.Dataset:
-    """The sidpy dataset a reference names. Treat it as read-only: it is the cached copy."""
+    """The sidpy dataset a reference names. Treat it as read-only: it is the cached copy.
+
+    A resolver is first asked for the whole reference, key included; one that returns a single sidpy.Dataset for it
+    has named it. Otherwise the reference is a source and a key, as for a file.
+    """
+    for resolver in _resolvers:
+        resolved = resolver(reference)
+        if isinstance(resolved, sidpy.Dataset):
+            return resolved
     source, key = split_reference(reference)
     datasets = load_datasets(source)
     if key is None:
