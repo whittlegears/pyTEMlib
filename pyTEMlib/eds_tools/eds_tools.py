@@ -173,7 +173,8 @@ def detect_peaks(dataset, minimum_number_of_peaks=30, prominence=10):
     minor_peaks, _  = scipy.signal.find_peaks(new_spectrum, prominence=prominence)
 
     if len(minor_peaks) < minimum_number_of_peaks:
-        while len(minor_peaks) < minimum_number_of_peaks:
+        # a spectrum with fewer maxima than asked for never reaches the count: stop once prominence no longer matters
+        while len(minor_peaks) < minimum_number_of_peaks and prominence > 1e-9:
             prominence/=10
             minor_peaks, _  = scipy.signal.find_peaks(new_spectrum, prominence=prominence)
     else:
