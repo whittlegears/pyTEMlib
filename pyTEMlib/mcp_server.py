@@ -5,6 +5,9 @@ This server provides MCP tools for analyzing TEM data using the pyTEMlib library
 It exposes key functionalities for file I/O, data analysis, and visualization.
 """
 
+import argparse
+import sys
+
 from fastmcp import FastMCP
 import numpy as np
 import os
@@ -19,7 +22,7 @@ try:
     from pyTEMlib import crystal_tools, diffraction_tools, probe_tools, graph_tools
     PYTEMLIB_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: pyTEMlib not available: {e}")
+    print(f"Warning: pyTEMlib not available: {e}", file=sys.stderr)
     PYTEMLIB_AVAILABLE = False
 
 # Create MCP server
@@ -325,11 +328,28 @@ def get_available_tools() -> str:
 
     return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in tools)
 
+def parse_args(argv=None):
+    """Server options from the command line, defaulting to environment variables."""
+    parser = argparse.ArgumentParser(description="pyTEMlib MCP server")
+    parser.add_argument("--transport", choices=["sse", "http", "streamable-http", "stdio"],
+                        default=os.environ.get("PYTEMLIB_MCP_TRANSPORT", "sse"),
+                        help="MCP transport (env PYTEMLIB_MCP_TRANSPORT, default sse)")
+    parser.add_argument("--host", default=os.environ.get("PYTEMLIB_MCP_HOST", "127.0.0.1"),
+                        help="Bind address; 0.0.0.0 exposes the server on your network "
+                             "(env PYTEMLIB_MCP_HOST, default 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PYTEMLIB_MCP_PORT", "8003")),
+                        help="Port (env PYTEMLIB_MCP_PORT, default 8003)")
+    parser.add_argument("--path", default=os.environ.get("PYTEMLIB_MCP_PATH", "/mcp"),
+                        help="URL path (env PYTEMLIB_MCP_PATH, default /mcp)")
+    return parser.parse_args(argv)
+
+
 # Run the server
 if __name__ == "__main__":
-    print("Starting pyTEMlib MCP Server...")
+    args = parse_args()
+    print(f"Starting pyTEMlib MCP Server ({args.transport})...", file=sys.stderr)
 
-    mcp.run(transport="sse",
-        host="127.0.0.1",  # Use "127.0.0.1" for local-only, "0.0.0.0" to expose on your network
-        port=8003,
-        path="/mcp")
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)

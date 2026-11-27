@@ -8,7 +8,8 @@ async def main():
     # Start the MCP server as a subprocess
     server_process = await asyncio.create_subprocess_exec(
         sys.executable,
-        str(Path("pyTEMlib/mcpserver.py")),
+        str(Path(__file__).parent / "mcp_server.py"),
+        "--transport", "stdio",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
