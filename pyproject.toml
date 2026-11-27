@@ -74,6 +74,12 @@ test = [
     "pytest",
     "pytest-runner"
 ]
+stitching = [
+    "opencv-python>=4.7.0",
+]
+atomai = [
+    "atomai",
+]
 
 [tool.setuptools]
 platforms = ["Linux", "Mac OSX", "Windows 11/10"]
