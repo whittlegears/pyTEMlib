@@ -27,9 +27,10 @@ from . import diffraction_tools
 from .config_dir import config_path
 from . import utilities
 from . import xrpa_x_sections
+from . import optimization_tools
 
 __all__ = ['__version__', 'file_tools', 'image_tools', 'atom_tools',
            'graph_tools', 'probe_tools', 'eels_tools', 'eds_tools',
            'crystal_tools', 'diffraction_tools', 'xrpa_x_sections',
-           'config_path', 'utilities']
+           'config_path', 'utilities', 'optimization_tools']
 __author__ = 'Gerd Duscher'

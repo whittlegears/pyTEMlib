@@ -28,6 +28,11 @@ mcp = FastMCP("pyTEMlib-MCP")
 # Global state for loaded datasets
 loaded_datasets = {}
 
+analysis_tool_names = []
+if PYTEMLIB_AVAILABLE:
+    from pyTEMlib import mcp_analysis_tools
+    analysis_tool_names = mcp_analysis_tools.register(mcp, loaded_datasets)
+
 @mcp.tool()
 def get_pytemlib_status() -> str:
     """Check if pyTEMlib is properly loaded and available."""
@@ -322,6 +327,7 @@ def get_available_tools() -> str:
         "create_visualization_script - Generate visualization code",
         "get_available_tools - List all available tools"
     ]
+    tools += [f"{name} - analysis tool (see its description)" for name in analysis_tool_names]
 
     return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in tools)
 
