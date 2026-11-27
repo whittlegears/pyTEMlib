@@ -72,7 +72,15 @@ pyTEMlib = "pyTEMlib:main"
 [project.optional-dependencies]
 test = [
     "pytest",
-    "pytest-runner"
+    "pytest-runner",
+    "jsonschema>=4.0",
+    "tiled[server]>=0.2.9,<0.3",
+]
+server = [
+    "fastmcp>=3.2.4",
+    "h5py>=3.0",
+    "dask",
+    "tiled[client]>=0.2.9,<0.3",
 ]
 stitching = [
     "opencv-python>=4.7.0",
