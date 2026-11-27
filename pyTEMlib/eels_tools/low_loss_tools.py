@@ -909,54 +909,60 @@ def residuals(params, energy_axis, zlp_experimental, i_experimental, num_peaks):
 # SIMULATED SETUP & EXECUTION PIPELINE
 # ==========================================
 
-# 1. Generate an energy axis (e.g., 0.1 eV steps from -5 to 65 eV)
-energy_axis = np.linspace(-5, 65, 700)
+def _demo() -> None:
+    """Fit a simulated low-loss spectrum. Run this module directly to see it; importing it must not."""
+    # 1. Generate an energy axis (e.g., 0.1 eV steps from -5 to 65 eV)
+    energy_axis = np.linspace(-5, 65, 700)
 
-# 2. Simulate an experimental ZLP (e.g., full-width at half-max ~ 0.5 eV)
-zlp_experimental = gaussian_peak(energy_axis, amp=1000, center=0.0, sigma=0.2)
+    # 2. Simulate an experimental ZLP (e.g., full-width at half-max ~ 0.5 eV)
+    zlp_experimental = gaussian_peak(energy_axis, amp=1000, center=0.0, sigma=0.2)
 
-# 3. Simulate a complex material with multiple arbitrary low-energy excitations:
-# Exciton / Interband transition @ 4 eV, Bulk Broad Feature @ 23 eV, Surface Feature @ 15 eV
-true_ssd = (gaussian_peak(energy_axis, amp=20, center=4.0, sigma=0.5) +   # Sharp low-energy
-            gaussian_peak(energy_axis, amp=15, center=15.0, sigma=2.0) +  # Surface plasmon/interband
-            gaussian_peak(energy_axis, amp=50, center=23.0, sigma=4.0))   # Main bulk excitation
+    # 3. Simulate a complex material with multiple arbitrary low-energy excitations:
+    # Exciton / Interband transition @ 4 eV, Bulk Broad Feature @ 23 eV, Surface Feature @ 15 eV
+    true_ssd = (gaussian_peak(energy_axis, amp=20, center=4.0, sigma=0.5) +   # Sharp low-energy
+                gaussian_peak(energy_axis, amp=15, center=15.0, sigma=2.0) +  # Surface plasmon/interband
+                gaussian_peak(energy_axis, amp=50, center=23.0, sigma=4.0))   # Main bulk excitation
 
-# True thickness scaling factor (y = t / \lambda)
-true_y = 0.4 
+    # True thickness scaling factor (y = t / \lambda)
+    true_y = 0.4 
 
-# Generate mock data with Poisson self-convolution terms + artificial noise
-true_i2 = (true_y / 2.0) * fftconvolve(true_ssd, true_ssd, mode='same')
-true_i3 = ((true_y**2) / 6.0) * fftconvolve(true_i2, true_ssd, mode='same')
-noise = np.random.normal(0, 1.5, size=energy_axis.shape)
-i_experimental = zlp_experimental + true_ssd + true_i2 + true_i3 + noise
+    # Generate mock data with Poisson self-convolution terms + artificial noise
+    true_i2 = (true_y / 2.0) * fftconvolve(true_ssd, true_ssd, mode='same')
+    true_i3 = ((true_y**2) / 6.0) * fftconvolve(true_i2, true_ssd, mode='same')
+    noise = np.random.normal(0, 1.5, size=energy_axis.shape)
+    i_experimental = zlp_experimental + true_ssd + true_i2 + true_i3 + noise
 
-# 4. Optimization Configuration
-# Guess parameters structure: [y, amp1, center1, sigma1, amp2, center2, sigma2, ...]
-num_peaks_to_fit = 3
-initial_guess = [
-    0.2,               # Initial guess for relative thickness (y)
-    10.0, 3.5, 1.0,    # Peak 1 guess
-    10.0, 12.0, 3.0,   # Peak 2 guess
-    30.0, 25.0, 5.0    # Peak 3 guess
-]
+    # 4. Optimization Configuration
+    # Guess parameters structure: [y, amp1, center1, sigma1, amp2, center2, sigma2, ...]
+    num_peaks_to_fit = 3
+    initial_guess = [
+        0.2,               # Initial guess for relative thickness (y)
+        10.0, 3.5, 1.0,    # Peak 1 guess
+        10.0, 12.0, 3.0,   # Peak 2 guess
+        30.0, 25.0, 5.0    # Peak 3 guess
+    ]
 
-# Set bounding arrays to keep values physically meaningful
-# Structure: [min_y, min_amp1, min_center1, min_sigma1, ...]
-lower_bounds = [0.0] + [0.0, 0.0, 0.1] * num_peaks_to_fit
-upper_bounds = [5.0] + [5000.0, 60.0, 15.0] * num_peaks_to_fit
+    # Set bounding arrays to keep values physically meaningful
+    # Structure: [min_y, min_amp1, min_center1, min_sigma1, ...]
+    lower_bounds = [0.0] + [0.0, 0.0, 0.1] * num_peaks_to_fit
+    upper_bounds = [5.0] + [5000.0, 60.0, 15.0] * num_peaks_to_fit
 
-# 5. Run the Non-Linear Fitting Loop
-result = least_squares(
-    residuals, 
-    initial_guess, 
-    bounds=(lower_bounds, upper_bounds),
-    args=(energy_axis, zlp_experimental, i_experimental, num_peaks_to_fit),
-    method='trf'  # Trust Region Reflective algorithm
-)
+    # 5. Run the Non-Linear Fitting Loop
+    result = least_squares(
+        residuals, 
+        initial_guess, 
+        bounds=(lower_bounds, upper_bounds),
+        args=(energy_axis, zlp_experimental, i_experimental, num_peaks_to_fit),
+        method='trf'  # Trust Region Reflective algorithm
+    )
 
-# 6. Extract Optimized Components
-fitted_params = result.x
-fit_total, fit_i1, fit_i2, fit_i3 = compute_forward_model(fitted_params, energy_axis, zlp_experimental, num_peaks_to_fit)
+    # 6. Extract Optimized Components
+    fitted_params = result.x
+    fit_total, fit_i1, fit_i2, fit_i3 = compute_forward_model(fitted_params, energy_axis, zlp_experimental, num_peaks_to_fit)
 
-print(f"Optimization Converged Successfully: {result.success}")
-print(f"Extracted Relative Thickness (t/λ): {fitted_params[0]:.3f} (True: {true_y})")
+    print(f"Optimization Converged Successfully: {result.success}")
+    print(f"Extracted Relative Thickness (t/λ): {fitted_params[0]:.3f} (True: {true_y})")
+
+
+if __name__ == "__main__":
+    _demo()

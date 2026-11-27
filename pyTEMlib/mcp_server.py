@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from fastmcp import FastMCP
+import functools
 import numpy as np
 import os
 import json
@@ -28,8 +29,14 @@ except ImportError as e:
 # Create MCP server
 mcp = FastMCP("pyTEMlib-MCP")
 
-# Global state for loaded datasets
-loaded_datasets = {}
+# Global state for loaded datasets: file name as given -> {key: sidpy.Dataset}.
+# It is the registry of pyTEMlib.mcp_analysis, so a file opened by either set of tools is known to both.
+if PYTEMLIB_AVAILABLE:
+    from pyTEMlib import mcp_analysis
+    loaded_datasets = mcp_analysis.loaded_datasets
+else:
+    mcp_analysis = None
+    loaded_datasets = {}
 
 @mcp.tool()
 def get_pytemlib_status() -> str:
@@ -69,8 +76,12 @@ def list_supported_file_formats() -> str:
         ".dm3, .dm4 - Digital Micrograph files",
         ".emd - EMD files",
         ".hf5 - HDF5/pyNSID files",
-        ".ndata - Nion data files",
-        ".mrc - MRC image files"
+        ".ndata, .h5 - Nion data files",
+        ".mrc - MRC image files",
+        ".rto - Bruker files",
+        ".npy - numpy arrays (1-D spectrum, 2-D image, 3-D image stack)",
+        ".csv, .txt, .tsv, .dat, .xy - text spectra (one or two numeric columns)",
+        ".msa, .emsa - EMSA/MAS spectra"
     ]
     return "Supported file formats:\n" + "\n".join(f"- {fmt}" for fmt in formats)
 
@@ -81,17 +92,17 @@ def open_tem_file(filename: str) -> str:
     Parameters:
     - filename: Path to the TEM data file
 
-    Returns a dictionary containing information about the loaded datasets.
+    Returns the keys, titles, types and shapes of the datasets in the file.
+    open_dataset returns the same as structured data.
     """
     if not PYTEMLIB_AVAILABLE:
-        return {"error": "pyTEMlib not available"}
+        return "pyTEMlib not available"
 
     try:
         if not os.path.exists(filename):
             return f"File not found: {filename}"
 
-        datasets = file_tools.open_file(filename)
-        loaded_datasets[filename] = datasets
+        datasets = mcp_analysis.load_datasets(filename)
 
         result = f"Successfully opened {filename}\n"
         result += f"Found {len(datasets)} datasets:\n"
@@ -100,8 +111,9 @@ def open_tem_file(filename: str) -> str:
             result += f"- {key}: {dataset.title} ({dataset.data_type.name})\n"
             if hasattr(dataset, 'shape'):
                 result += f"  Shape: {dataset.shape}\n"
-        import json
-        return json.dumps(datasets)  # Return all datasets as JSON for demonstration
+        return result
+    except mcp_analysis.AnalysisError as e:
+        return f"Error opening file: {e.message}"
     except Exception as e:
         return f"Error opening file: {str(e)}\n{traceback.format_exc()}"
 
@@ -309,24 +321,74 @@ plt.show()
 
     return script
 
+# The first tools of this server, in the order they have always been listed.
+BASIC_TOOLS = [
+    "get_pytemlib_status - Check if pyTEMlib is loaded",
+    "calculate_electron_wavelength - Calculate electron wavelength",
+    "list_supported_file_formats - Show supported file formats",
+    "open_tem_file - Open TEM data files",
+    "list_loaded_datasets - List currently loaded datasets",
+    "get_dataset_info - Get detailed dataset information",
+    "calculate_probe_size - Calculate electron probe size",
+    "get_element_info - Get element information for spectroscopy",
+    "analyze_diffraction_pattern - Analyze diffraction patterns",
+    "create_visualization_script - Generate visualization code",
+    "get_available_tools - List all available tools",
+]
+
+# Tools that only read and compute. The analysis tools below are all of this kind.
+READ_ONLY_HINT = {"readOnlyHint": True}
+ANALYSIS_TOOLS: List[str] = []
+
+
+def _first_line(function) -> str:
+    return (function.__doc__ or "").strip().split("\n")[0].rstrip(".")
+
+
+def _register_analysis_tool(function, annotations):
+    """Register one pyTEMlib.mcp_analysis function as an MCP tool with its own name, signature and docstring.
+
+    A result that carries an image (key ``_png``) becomes its dict plus a PNG image content block.
+    """
+    from fastmcp.tools import ToolResult
+    from fastmcp.utilities.types import Image
+
+    @functools.wraps(function)
+    def run(*args, **kwargs):
+        result = function(*args, **kwargs)
+        if isinstance(result, dict) and "_png" in result:
+            png = result.pop("_png")
+            return ToolResult(content=[json.dumps(result), Image(data=png, format="png")], structured_content=result)
+        return result
+
+    mcp.tool(annotations=annotations)(run)
+    ANALYSIS_TOOLS.append(f"{function.__name__} - {_first_line(function)}")
+
+
+if PYTEMLIB_AVAILABLE:
+    # Dataset reading, reference data, EDS, EELS, peak fitting, image and probe tools. Each takes a dataset
+    # reference ("path" or "path#key"), returns a dict, and refuses with {"error": {"code", "message"}}.
+    for _function in mcp_analysis.READ_ONLY_TOOLS:
+        _register_analysis_tool(_function, READ_ONLY_HINT)
+    for _function in mcp_analysis.STORING_TOOLS:
+        _register_analysis_tool(_function, None)
+
+
 @mcp.tool()
 def get_available_tools() -> str:
     """List all available MCP tools for pyTEMlib."""
-    tools = [
-        "get_pytemlib_status - Check if pyTEMlib is loaded",
-        "calculate_electron_wavelength - Calculate electron wavelength",
-        "list_supported_file_formats - Show supported file formats",
-        "open_tem_file - Open TEM data files",
-        "list_loaded_datasets - List currently loaded datasets",
-        "get_dataset_info - Get detailed dataset information",
-        "calculate_probe_size - Calculate electron probe size",
-        "get_element_info - Get element information for spectroscopy",
-        "analyze_diffraction_pattern - Analyze diffraction patterns",
-        "create_visualization_script - Generate visualization code",
-        "get_available_tools - List all available tools"
-    ]
+    return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in BASIC_TOOLS + ANALYSIS_TOOLS)
 
-    return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in tools)
+
+def main(argv=None):
+    """Run the server; options default to the PYTEMLIB_MCP_* environment variables, then SSE on 127.0.0.1:8003 at /mcp."""
+    args = parse_args(argv)
+    print(f"Starting pyTEMlib MCP Server ({args.transport})...", file=sys.stderr)
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+    mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)
+
 
 def parse_args(argv=None):
     """Server options from the command line, defaulting to environment variables."""
@@ -346,10 +408,4 @@ def parse_args(argv=None):
 
 # Run the server
 if __name__ == "__main__":
-    args = parse_args()
-    print(f"Starting pyTEMlib MCP Server ({args.transport})...", file=sys.stderr)
-
-    if args.transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
-        mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)
+    main()
