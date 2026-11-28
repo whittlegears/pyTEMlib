@@ -1,22 +1,25 @@
-import requests
 import json
 from urllib.parse import urljoin
 
+import requests
+
+from pytemlib_mcp.defaults import HOST, PORT, MCP_PATH
+
+
 class RemoteMCPClient:
     """Direct HTTP client for MCP server with SSE support."""
-    
-    def __init__(self, ip_address: str, port: int = 8000):
+
+    def __init__(self, ip_address: str = HOST, port: int = PORT):
         self.ip_address = ip_address
         self.port = port
         self.base_url = f"http://{ip_address}:{port}"
         self.request_id = 1
-        self.active_endpoint = "/mcp"
-        self.session_id = None
+        self.active_endpoint = MCP_PATH
         self.server_info = None
         self._stream = None
         self._events = None
         self._message_url = None
-    
+
     def _create_request(self, method: str, params: dict = None):
         """Create a JSON-RPC request."""
         request = {
@@ -28,7 +31,7 @@ class RemoteMCPClient:
             request["params"] = params
         self.request_id += 1
         return request
-    
+
     def _open_sse_stream(self):
         """Open the SSE stream and discover its JSON-RPC message endpoint."""
         url = f"{self.base_url}{self.active_endpoint}"
@@ -71,7 +74,7 @@ class RemoteMCPClient:
                 return json.loads(line.removeprefix("data: ").strip())
 
         raise RuntimeError("MCP SSE stream ended before returning a response")
-    
+
     def initialize(self):
         """Initialize the connection using the server's SSE transport."""
         result = self._request("initialize", {
@@ -81,19 +84,19 @@ class RemoteMCPClient:
         })
         self.server_info = result.get("result", {}).get("serverInfo", {})
         return result
-    
+
     def list_tools(self):
         """List available tools on server."""
         if not self.server_info:
             raise Exception("Not initialized. Call initialize() first.")
-        
+
         return self._request("tools/list")
-    
+
     def call_tool(self, name: str, arguments: dict):
         """Call a specific tool."""
         if not self.server_info:
             raise Exception("Not initialized. Call initialize() first.")
-        
+
         return self._request("tools/call", {
             "name": name,
             "arguments": arguments
@@ -113,19 +116,8 @@ class RemoteMCPClient:
     def __exit__(self, *_):
         self.close()
 
-# Usage
 if __name__ == "__main__":
-    client = RemoteMCPClient("10.46.217.241", 9091)
-    
-    # Initialize
-    init_response = client.initialize()
-    print("\n\n exit()" \
-    "Initialized:", init_response)
-    
-    # List tools
-    tools = client.list_tools()
-    print("\n\n Available tools:", tools)
-    
-    # Call a tool
-    result = client.call_tool("CAMERA_Status", {})
-    print("\n\n Tool result:", result)
+    with RemoteMCPClient() as client:
+        print("Initialized:", client.initialize())
+        print("Available tools:", client.list_tools())
+        print("Tool result:", client.call_tool("get_pytemlib_status", {}))
