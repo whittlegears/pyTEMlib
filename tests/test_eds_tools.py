@@ -86,3 +86,17 @@ class TestFileFunctions(unittest.TestCase):
         """Test absorption correction"""
         pyTEMlib.eds_tools.apply_absorption_correction(spectrum, 30)
         self.assertIn('corrected-atom%', spectrum.metadata['EDS']['elements']['Ti'])
+
+
+class TestDetectPeaks(unittest.TestCase):
+
+    def test_a_peak_is_found_on_its_channel_when_the_smoothing_width_comes_out_even(self):
+        energy = np.arange(0.0, 10000.0, 10.0)
+        counts = 900.0 * np.exp(-0.5 * ((energy - 1740.0) / (130.0 / 2.3548)) ** 2)
+        dataset = sidpy.Dataset.from_array(counts)
+        dataset.data_type = 'SPECTRUM'
+        dataset.set_dimension(0, sidpy.Dimension(energy, name='energy_scale', units='eV',
+                                                 quantity='energy', dimension_type='spectral'))
+        dataset.metadata['EDS'] = {'detector': {'energy_resolution': 136.0, 'start_channel': 12}}
+        peaks = pyTEMlib.eds_tools.detect_peaks(dataset, minimum_number_of_peaks=1)
+        self.assertIn(174, list(peaks))

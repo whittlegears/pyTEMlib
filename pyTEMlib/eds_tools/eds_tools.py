@@ -168,6 +168,7 @@ def detect_peaks(dataset, minimum_number_of_peaks=30, prominence=10):
     start = dataset.metadata['EDS']['detector']['start_channel']
     ## we use half the width of the resolution for smearing
     width = int(np.ceil(resolution/(energy_scale[1]-energy_scale[0])/2)+1)
+    width += 1 - width % 2  # an even Savitzky-Golay window is asymmetric and moves every peak half a channel
     new_spectrum =  scipy.signal.savgol_filter(np.array(dataset)[start:], width, 2)
 
     minor_peaks, _  = scipy.signal.find_peaks(new_spectrum, prominence=prominence)
