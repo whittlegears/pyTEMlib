@@ -26,14 +26,13 @@ run's points of interest are kept once for all its versions (see ``map_store``).
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import math
 import re
-from pathlib import Path
 import time
 import uuid
 import weakref
+from pathlib import Path
 from typing import Any
 
 import h5py
@@ -43,6 +42,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as MCPImage
 
 from pyTEMlib import __version__
+from pyTEMlib.mcp_analysis import to_png
 from pyTEMlib.image_tools import (
     BaselineScorer,
     assemble,
@@ -54,7 +54,6 @@ from pyTEMlib.image_tools import (
     stage_canvas_shape,
     stitch_quality,
 )
-
 from pyTEMlib.image_tools.image_mosaic import pair_shift
 
 from .frames import FrameError, frame_of, image_dataset, image_node
@@ -78,19 +77,6 @@ SCORERS.register(BaselineScorer)
 
 # Maps each FastMCP app to the MapTools it serves, so the tools are never registered twice.
 _REGISTERED: "weakref.WeakKeyDictionary[FastMCP, MapTools]" = weakref.WeakKeyDictionary()
-
-
-def _png(array: np.ndarray, max_side: int = PREVIEW_MAX_SIDE) -> bytes:
-    from PIL import Image
-
-    data = np.asarray(array, dtype=np.float64)
-    step = max(1, int(np.ceil(max(data.shape) / max_side)))
-    data = data[::step, ::step]
-    lo, hi = np.percentile(data, [1, 99.5]) if data.size else (0.0, 1.0)
-    scaled = np.clip((data - lo) / (hi - lo if hi > lo else 1.0), 0, 1)
-    buffer = io.BytesIO()
-    Image.fromarray((scaled * 255).astype(np.uint8)).save(buffer, format="PNG")
-    return buffer.getvalue()
 
 
 def _loads(request: str | dict) -> dict:
@@ -143,6 +129,8 @@ def measured_drift_only(quality: dict) -> dict:
     if drift_measured(quality):
         return quality
     return {**{k: v for k, v in quality.items() if k != "drift"}, "drift_unmeasured": DRIFT_UNMEASURED}
+
+
 def finite_or_none(value: Any) -> Any:
     """Return ``value`` with each number that is not finite replaced by None, which JSON can carry."""
     if isinstance(value, dict):
@@ -177,7 +165,6 @@ class MapTools:
         self.jobs.register("assemble_map", self._check_assemble, self._run_assemble, resource=lambda plan: f"map of {plan['run']}")
         self.jobs.register("score_map", self._check_score, self._run_score, resource=lambda plan: f"scoring of {plan['map']}")
 
-    # tasks
     def _check_assemble(self, plan: dict) -> dict:
         # This must answer at once whatever the run's size. The job itself
         # reads the tile positions and checks the canvas before reading any pixel.
@@ -547,7 +534,6 @@ class MapTools:
                        if near else "this map has no points of interest")
         return out
 
-    # tools
     def register(self, mcp: FastMCP) -> None:
         """Add the map tools to ``mcp``. Registering the same MapTools again is a no-op; a second MapTools is refused."""
         owner = _REGISTERED.get(mcp)
@@ -726,7 +712,7 @@ class MapTools:
             if region.size == 0:
                 return ToolResult(content=[json.dumps({**info, "note": "box is outside the map"})], structured_content=info)
             info.update({"mean": float(region.mean()), "max": float(region.max())})
-            return ToolResult(content=[json.dumps(info), MCPImage(data=_png(region), format="png")], structured_content=info)
+            return ToolResult(content=[json.dumps(info), MCPImage(data=to_png(region, PREVIEW_MAX_SIDE), format="png")], structured_content=info)
 
     def _register_poi_tools(self, mcp: FastMCP) -> None:
         """Add the tools that list and add points of interest."""

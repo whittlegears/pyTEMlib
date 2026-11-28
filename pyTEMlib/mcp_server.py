@@ -9,6 +9,8 @@ import argparse
 import sys
 
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
 import functools
 import numpy as np
 import os
@@ -336,7 +338,6 @@ BASIC_TOOLS = [
     "get_available_tools - List all available tools",
 ]
 
-# Tools that only read and compute. The analysis tools below are all of this kind.
 READ_ONLY_HINT = {"readOnlyHint": True}
 ANALYSIS_TOOLS: List[str] = []
 
@@ -345,13 +346,11 @@ def _first_line(function) -> str:
     return (function.__doc__ or "").strip().split("\n")[0].rstrip(".")
 
 
-def _register_analysis_tool(function, annotations):
-    """Register one pyTEMlib.mcp_analysis function as an MCP tool with its own name, signature and docstring.
+def _register_analysis_tool(function):
+    """Register one pyTEMlib.mcp_analysis function as a read-only MCP tool with its own name, signature and docstring.
 
     A result that carries an image (key ``_png``) becomes its dict plus a PNG image content block.
     """
-    from fastmcp.tools import ToolResult
-    from fastmcp.utilities.types import Image
 
     @functools.wraps(function)
     def run(*args, **kwargs):
@@ -361,17 +360,14 @@ def _register_analysis_tool(function, annotations):
             return ToolResult(content=[json.dumps(result), Image(data=png, format="png")], structured_content=result)
         return result
 
-    mcp.tool(annotations=annotations)(run)
+    mcp.tool(annotations=READ_ONLY_HINT)(run)
     ANALYSIS_TOOLS.append(f"{function.__name__} - {_first_line(function)}")
 
 
 if PYTEMLIB_AVAILABLE:
-    # Dataset reading, reference data, EDS, EELS, peak fitting, image and probe tools. Each takes a dataset
-    # reference ("path" or "path#key"), returns a dict, and refuses with {"error": {"code", "message"}}.
+    # Each takes a dataset reference ("path" or "path#key"), returns a dict, and refuses with {"error": {"code", "message"}}.
     for _function in mcp_analysis.READ_ONLY_TOOLS:
-        _register_analysis_tool(_function, READ_ONLY_HINT)
-    for _function in mcp_analysis.STORING_TOOLS:
-        _register_analysis_tool(_function, None)
+        _register_analysis_tool(_function)
 
 
 @mcp.tool()

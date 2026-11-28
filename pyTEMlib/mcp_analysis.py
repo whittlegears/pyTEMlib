@@ -39,13 +39,15 @@ from typing import Any, Callable, Optional, Union
 import numpy as np
 import scipy
 import sidpy
+import skimage.registration
+from PIL import Image
 
 from . import file_tools, utilities, probe_tools
 from . import eels_tools, eds_tools, image_tools
 from .eels_tools import zero_loss_tools, low_loss_tools, core_loss_tools, peak_fit_tools
+from .eels_tools.eels_database import read_msa
 
-__all__ = ['AnalysisError', 'add_resolver', 'set_allowed_roots', 'loaded_datasets', 'READ_ONLY_TOOLS',
-           'STORING_TOOLS']
+__all__ = ['AnalysisError', 'add_resolver', 'set_allowed_roots', 'loaded_datasets', 'READ_ONLY_TOOLS']
 
 # file name as given -> {key: sidpy.Dataset}; shared with the older tools of mcp_server.py
 loaded_datasets: dict[str, dict] = {}
@@ -100,14 +102,9 @@ def _jsonable(value):
     if isinstance(value, (float, np.floating)):
         value = float(value)
         return value if math.isfinite(value) else None
-    if isinstance(value, (bytes, bytearray)):
-        return value
     return value
 
 
-# ---------------------------------------------------------------------------------------------
-# dataset references
-# ---------------------------------------------------------------------------------------------
 def add_resolver(resolver: Callable[[str], Any]) -> None:
     """Add a function ``reference -> sidpy.Dataset | {key: sidpy.Dataset} | None`` tried before files.
 
@@ -196,7 +193,6 @@ def _read_text_spectrum(path: str) -> sidpy.Dataset:
 
 def _read_msa(path: str) -> sidpy.Dataset:
     """EMSA/MAS spectrum through pyTEMlib.eels_tools.eels_database.read_msa."""
-    from .eels_tools.eels_database import read_msa
     with open(path, 'r', encoding='utf-8', errors='replace') as handle:
         parameters = read_msa(handle.read())
     counts = np.asarray(parameters.get('data', parameters.get('spectrum', [])), dtype=float)
@@ -266,9 +262,6 @@ def resolve(reference: str) -> sidpy.Dataset:
     return datasets[key]
 
 
-# ---------------------------------------------------------------------------------------------
-# helpers shared by the analysis tools
-# ---------------------------------------------------------------------------------------------
 def _curve(x, y) -> dict:
     return {'x': np.asarray(x, dtype=float), 'y': np.asarray(y, dtype=float)}
 
@@ -340,7 +333,6 @@ def image_of(reference: str) -> tuple[sidpy.Dataset, dict]:
 
 def to_png(array: np.ndarray, max_side: int = MAX_PNG_SIDE) -> bytes:
     """An 8-bit greyscale PNG of a 2-D array, scaled between its 0.5 and 99.5 percentiles and strided to max_side."""
-    from PIL import Image
     array = np.asarray(array, dtype=float)
     step = max(1, -(-max(array.shape) // max_side))
     array = array[::step, ::step]
@@ -376,9 +368,6 @@ def _element(element: Union[str, int]) -> tuple[int, dict]:
     return z, table
 
 
-# ---------------------------------------------------------------------------------------------
-# reference data
-# ---------------------------------------------------------------------------------------------
 def _emission_lines(table: dict, energy_min_ev: float, energy_max_ev: float, min_weight: float) -> list[dict]:
     lines = []
     for name, line in table.get('lines', {}).items():
@@ -416,9 +405,6 @@ def element_reference_data(element: Union[str, int]) -> dict:
             'fluorescence_yield': dict(table.get('fluorescent_yield', {}))}
 
 
-# ---------------------------------------------------------------------------------------------
-# EDS
-# ---------------------------------------------------------------------------------------------
 def _eds_spectrum(reference: str, resolution_ev: Optional[float] = None, start_energy_ev: Optional[float] = None,
                   beam_energy_ev: Optional[float] = None) -> tuple[sidpy.Dataset, np.ndarray, dict]:
     """A spectrum copy with the metadata pyTEMlib.eds_tools needs; the notes say which values were assumed."""
@@ -573,9 +559,6 @@ def eds_quantify(dataset: str, elements: Optional[list] = None, beam_energy_ev: 
     return _with_curves(result, include_curves, spectrum=(energy, np.asarray(spectrum)), model=(energy, model))
 
 
-# ---------------------------------------------------------------------------------------------
-# EELS
-# ---------------------------------------------------------------------------------------------
 def _eels_spectrum(reference: str, align: bool = False, optics: bool = False) -> tuple[sidpy.Dataset, np.ndarray, dict]:
     """A spectrum copy, optionally zero-loss aligned. With optics, the beam energy and angles pyTEMlib.eels_tools
     reads from metadata['experiment'] are filled in when the file has none, and the notes say which were assumed."""
@@ -856,9 +839,6 @@ def eels_fit_multiple_scattering(dataset: str, fit_start_ev: float, fit_end_ev: 
                         zero_loss=(energy, zero_loss))
 
 
-# ---------------------------------------------------------------------------------------------
-# generic peaks
-# ---------------------------------------------------------------------------------------------
 PEAK_TYPES = ('Gaussian', 'Lorentzian', 'Voigt')
 _SIGMA_PER_FWHM = 1.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
 
@@ -961,9 +941,6 @@ def fit_spectrum_peaks(dataset: str, initial: Optional[list] = None, start_ev: O
     return _with_curves(result, include_curves, fit=(energy, model), residual=(energy, residual))
 
 
-# ---------------------------------------------------------------------------------------------
-# images
-# ---------------------------------------------------------------------------------------------
 @tool
 def image_fft(dataset: str, max_side: int = 512, include_array: bool = False) -> dict:
     """Fourier transform magnitude of an image, log(1 + |F|) with zero frequency at the centre
@@ -998,7 +975,6 @@ def register_images(reference: str, moving: str, upsample_factor: int = 10) -> d
     (unnormalised, its default); this calls the same routine on two separate images, with sub-pixel refinement.
     confidence is 1 minus the routine's normalised RMS error between the images after the shift.
     """
-    import skimage.registration
     first, notes = image_of(reference)
     second, _ = image_of(moving)
     if first.shape != second.shape:
@@ -1055,9 +1031,6 @@ def refine_atoms(dataset: str, atoms: list, radius_px: float = 3.0, max_dist_px:
     return {'atoms': result, 'refined': sum(atom['refined'] for atom in result), 'total': len(result), **notes}
 
 
-# ---------------------------------------------------------------------------------------------
-# probe
-# ---------------------------------------------------------------------------------------------
 @tool
 def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 0.0, cs_mm: float = 0.0,
                    fov_nm: float = 4.0, size_px: int = 256, aberrations: Optional[dict] = None,
@@ -1088,11 +1061,11 @@ def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 
     radius = np.hypot(rows - centre[0], columns - centre[1]) * pixel
     order = np.argsort(radius, axis=None)
     enclosed = np.cumsum(probe.ravel()[order]) / total
-    result = {'wavelength_nm': float(utilities.get_wavelength(ab['acceleration_voltage'], 'nm')), 'fov_nm': float(fov_nm),
-              'pixel_nm': pixel, 'size_px': int(size_px),
+    wavelength_nm = float(utilities.get_wavelength(ab['acceleration_voltage'], 'nm'))
+    result = {'wavelength_nm': wavelength_nm, 'fov_nm': float(fov_nm), 'pixel_nm': pixel, 'size_px': int(size_px),
               'half_intensity_radius_nm': float(radius.ravel()[order][int(np.searchsorted(enclosed, 0.5))]),
               'peak_intensity_fraction': float(probe.max() / total),
-              'diffraction_limit_nm': 0.61 * float(utilities.get_wavelength(ab['acceleration_voltage'], 'nm')) / (aperture_mrad / 1000.0)}
+              'diffraction_limit_nm': 0.61 * wavelength_nm / (aperture_mrad / 1000.0)}
     if include_image:
         result['_png'] = to_png(probe, 512)
     if include_array:
@@ -1100,7 +1073,7 @@ def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 
     return result
 
 
-# which tools only compute (read) and which keep something on the server; mcp_server.py marks the first readOnlyHint
+# every tool here only computes; mcp_server.py marks them readOnlyHint
 READ_ONLY_TOOLS = (xray_emission_lines, xray_absorption_edges, element_reference_data,
                    eds_find_peaks, eds_identify_elements, eds_describe_elements, eds_element_lines, eds_net_intensity,
                    eds_quantify, eels_find_zero_loss_peak, eels_align_zero_loss, eels_resolution_function,
@@ -1108,4 +1081,3 @@ READ_ONLY_TOOLS = (xray_emission_lines, xray_absorption_edges, element_reference
                    eels_subtract_power_law_background, eels_integrate_signal, eels_quantify,
                    eels_fit_drude_plasmon, eels_fit_multiple_scattering, find_spectrum_peaks, fit_spectrum_peaks,
                    image_fft, register_images, find_atoms, refine_atoms, simulate_probe)
-STORING_TOOLS = ()
