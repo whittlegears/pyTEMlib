@@ -43,7 +43,7 @@ import skimage.registration
 from PIL import Image
 
 from . import file_tools, utilities, probe_tools
-from . import eels_tools, eds_tools, image_tools
+from . import eds_tools, image_tools
 from .eels_tools import zero_loss_tools, low_loss_tools, core_loss_tools, peak_fit_tools
 from .eels_tools.eels_database import read_msa
 
