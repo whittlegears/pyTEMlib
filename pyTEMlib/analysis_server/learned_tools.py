@@ -26,6 +26,12 @@ import uuid
 from typing import Any, Callable
 
 import numpy as np
+import pandas as pd
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image as MCPImage
+from PIL import Image
+
+from pyTEMlib import mcp_analysis
 
 KINDS = {"segment_sam": ("segmentation", "sam"), "find_atoms_blobnet": ("atom_positions", "blobnet")}
 SAVING_TOOLS = ("segment_sam_and_save", "find_atoms_blobnet_and_save")
@@ -43,8 +49,6 @@ def _refused(code: str, message: str) -> dict:
 
 
 def _rgb(png: bytes) -> np.ndarray:
-    from PIL import Image
-
     return np.asarray(Image.open(io.BytesIO(png)).convert("RGB"))
 
 
@@ -55,8 +59,6 @@ def _labels(result: dict) -> np.ndarray:
 
 
 def _table(rows: list[dict], columns: tuple[str, ...]):
-    import pandas as pd
-
     return pd.DataFrame(rows, columns=list(dict.fromkeys([*columns, *(k for row in rows for k in row)])))
 
 
@@ -106,10 +108,7 @@ def _reply(result: dict, saved: str, list_key: str, limit: int, include_image: b
     png = result.get("_png") if include_image else None
     if not png:
         return reply
-    from fastmcp.tools import ToolResult
-    from fastmcp.utilities.types import Image
-
-    return ToolResult(content=[json.dumps(reply), Image(data=png, format="png")], structured_content=reply)
+    return ToolResult(content=[json.dumps(reply), MCPImage(data=png, format="png")], structured_content=reply)
 
 
 def register(mcp, client: Callable[[], Any], sample_of: Callable[[str], dict], is_local: Callable[[str], bool],
@@ -119,8 +118,6 @@ def register(mcp, client: Callable[[], Any], sample_of: Callable[[str], dict], i
     ``client()`` is the Tiled client (None: no Tiled server, and the tools refuse); ``sample_of(key)`` the sample a
     dataset recorded; ``is_local(source)`` whether a reference is a local file; ``version()`` a new version suffix.
     """
-    from pyTEMlib import mcp_analysis
-
     if not all(hasattr(mcp_analysis, tool) for tool in KINDS):
         return []
 

@@ -60,9 +60,6 @@ class Axis:
     def values(self, start: int, stop: int, step: int = 1) -> np.ndarray:
         return self.offset + self.scale * np.arange(start, stop, step, dtype=np.float64)
 
-    def channel(self, value: float) -> float:
-        return (value - self.offset) / self.scale if self.scale else 0.0
-
 
 def numpy_to_python(obj: Any) -> Any:
     """Recursively convert numpy types to Python types for JSON serialization."""

@@ -8,29 +8,19 @@ import time
 from pathlib import Path
 
 from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.transforms import GetToolNext, Transform
 from fastmcp.tools import ToolResult
 from mcp.types import ToolAnnotations
 
+from .. import mcp_server as basic_tools
 from ..mcp_analysis import READ_ONLY_TOOLS as _ANALYSIS_TOOLS
+from . import annotation_store, frames, learned_tools, placement_tools, tiled_datasets
 from .frames import unknown_key
 from .jobs import DEFAULT_MAX_WORKERS
 from .map_store import MapStore
 from .map_tools import DEFAULT_MAX_CANVAS_PIXELS, MapTools
-from .names import CALLER_HEADER, RUN_HEADER
-from .tool_log import ToolCallLog
-
-
-def caller_and_run() -> tuple[str | None, str | None]:
-    """The calling agent and its run, from the X-Asyncroscopy-Caller and X-Asyncroscopy-Run headers agents send;
-    (None, None) outside an HTTP request."""
-    try:
-        headers = {k.lower(): v for k, v in (get_http_headers(include_all=True) or {}).items()}
-    except Exception:
-        return None, None
-    return headers.get(CALLER_HEADER.lower()) or None, headers.get(RUN_HEADER.lower()) or None
+from .tool_log import ToolCallLog, caller_and_run
 
 
 class ToolLog(Middleware):
@@ -58,7 +48,6 @@ class ToolLog(Middleware):
         self.log.record(params.name, dict(params.arguments or {}), started, time.perf_counter() - began, result=text,
                         source="analysis", caller=caller, run=run)
         return result
-
 
 
 def missing_key(exc: BaseException) -> str | None:
@@ -166,31 +155,22 @@ def create_server(
     if trace_path:
         mcp.add_middleware(ToolLog(trace_path))
     if include_basic:
-        from pyTEMlib import mcp_server as basic_tools
-
         mcp.mount(basic_tools.mcp)
     tools = MapTools(MapStore(tiled_uri, api_key, local_roots=local_roots), max_canvas_pixels=max_canvas_pixels, max_jobs=max_jobs,
                      local_runs=local_runs)
     mcp.add_middleware(UnknownKeyReply(tools.store))
     tools.register(mcp)
-    if include_basic and _ANALYSIS_TOOLS:
-        from .tiled_datasets import install as install_tiled_datasets
+    if include_basic:
+        def tiled_client():
+            return tools.store.client if tiled_uri else None
 
-        install_tiled_datasets(lambda: tools.store.client if tiled_uri else None, local_roots)
-        from .learned_tools import register as register_learned
-
-        register_learned(mcp, lambda: tools.store.client if tiled_uri else None, tools.store.sample_of, tools.store.is_local,
-                         tools.store.version_suffix)
-    from .frames import register as register_frames
-
-    register_frames(mcp, tools.store)
+        tiled_datasets.install(tiled_client, local_roots)
+        learned_tools.register(mcp, tiled_client, tools.store.sample_of, tools.store.is_local, tools.store.version_suffix)
+    frames.register(mcp, tools.store)
     if annotations_path:
-        from .annotation_store import AnnotationStore, register as register_notes
-
-        register_notes(mcp, AnnotationStore(annotations_path), tools.store.dataset_key, tools.store.sample_of)
+        annotation_store.register(mcp, annotation_store.AnnotationStore(annotations_path), tools.store.dataset_key,
+                                  tools.store.sample_of)
     if placements_path:
-        from .placement_tools import PlacementLog, register as register_placements
-
-        register_placements(mcp, tools.store, PlacementLog(placements_path))
+        placement_tools.register(mcp, tools.store, placement_tools.PlacementLog(placements_path))
     mcp.add_transform(MarkReadOnly(READ_ONLY))
     return mcp, tools

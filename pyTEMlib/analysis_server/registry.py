@@ -18,13 +18,14 @@ import importlib.util
 import os
 import re
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Generic, TypeVar
 
 from . import environment
 from .environment import PLUGINS_ENV
+
 
 def plugin_specs(value: str | None = None) -> list[str]:
     """The entries of ``value`` (default: the ``ASYNCROSCOPY_PLUGINS`` variable), in order, without blanks or repeats."""
@@ -97,14 +98,10 @@ class Plugins:
                     _import_file(Path(spec))
                 else:
                     importlib.import_module(spec)
-            except Exception as exc:  # a broken plug-in must not take the device down, so it is reported instead
+            except Exception as exc:  # a broken plug-in is reported, not allowed to take the server down
                 self._errors[spec] = f"{type(exc).__name__}: {exc}"
                 print(f"[pyTEMlib.analysis_server.registry] could not import {spec!r}: {self._errors[spec]}", file=sys.stderr)
         return {spec: self._errors[spec] for spec in entries if spec in self._errors}
-
-    def errors(self) -> dict[str, str]:
-        """{entry: error} for every plug-in that failed to import."""
-        return dict(self._errors)
 
     def hint(self) -> str:
         """Text for an "unknown name" error: what failed to import, or how to make a plug-in visible."""
@@ -121,36 +118,24 @@ T = TypeVar("T", bound=type)
 
 
 class Registry(Generic[T]):
-    """Named classes of one kind, found from decorators, built-in modules, plug-ins and entry points.
+    """Named classes of one kind, found from decorators, plug-ins and entry points.
 
-    ``kind`` names the thing in error messages ("instrument profile"). ``key`` is the class attribute
-    holding a class's registered name (``name`` for most, ``source`` for specimens).
+    ``kind`` names the thing in error messages ("scorer"); a class's registered name is its ``name`` attribute.
     """
 
-    def __init__(
-        self,
-        group: str,
-        builtins: Mapping[str, str] | None = None,
-        *,
-        kind: str,
-        key: str = "name",
-        plugins: Plugins | None = None,
-    ) -> None:
+    def __init__(self, group: str, *, kind: str, plugins: Plugins | None = None) -> None:
         self.group = group
-        self.builtins: dict[str, str] = dict(builtins or {})
         self.kind = kind
-        self.key = key
         self._plugins = plugins if plugins is not None else PLUGINS
         self._classes: dict[str, T] = {}
         self._entry_points_loaded = False
         self._errors: dict[str, str] = {}
 
-    # registering
     def register(self, cls: T) -> T:
-        """Make ``cls`` available under its ``key`` attribute; usable as a class decorator."""
-        name = getattr(cls, self.key, "")
+        """Make ``cls`` available under its ``name``; usable as a class decorator."""
+        name = getattr(cls, "name", "")
         if not name:
-            raise ValueError(f"{cls.__name__} needs a {self.key}")
+            raise ValueError(f"{cls.__name__} needs a name")
         self._classes[str(name)] = cls
         return cls
 
@@ -158,11 +143,8 @@ class Registry(Generic[T]):
         """Forget ``name`` (tests register throwaway classes)."""
         self._classes.pop(name, None)
 
-    # looking up
     def get(self, name: str) -> T:
         """The class registered as ``name``; ValueError naming the known ones and any load failures otherwise."""
-        if name not in self._classes and name in self.builtins:
-            self._import(self.builtins[name])
         if name not in self._classes:
             self.load()
         if name not in self._classes:
@@ -174,13 +156,8 @@ class Registry(Generic[T]):
         self.load()
         return dict(self._classes)
 
-    def __contains__(self, name: object) -> bool:
-        return name in self._classes
-
     def load(self) -> None:
-        """Import the built-in modules, the plug-ins, and (once) the entry points."""
-        for module in dict.fromkeys(self.builtins.values()):
-            self._import(module)
+        """Import the plug-ins and (once) the entry points."""
         if self._plugins is not None:
             self._plugins.load()
         if self._entry_points_loaded:
@@ -189,12 +166,10 @@ class Registry(Generic[T]):
         for point in entry_points(group=self.group):
             try:
                 self.register(point.load())
-            except Exception as exc:  # a broken plug-in must not take the device down, so it is reported instead
-                self._fail(f"entry point {point.name!r}", exc)
-
-    def errors(self) -> dict[str, str]:
-        """{source: error} for every built-in module or entry point that failed to load."""
-        return dict(self._errors)
+            except Exception as exc:  # a broken plug-in is reported, not allowed to take the server down
+                self._errors[f"entry point {point.name!r}"] = f"{type(exc).__name__}: {exc}"
+                print(f"[pyTEMlib.analysis_server.registry] {self.group}: could not load entry point {point.name!r}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
 
     def hint(self) -> str:
         """Text for an "unknown name" error: what failed to load, or how to make a plug-in visible."""
@@ -202,17 +177,3 @@ class Registry(Generic[T]):
         if self._plugins is not None:
             text += self._plugins.hint()
         return text
-
-    # internals
-    def _import(self, module: str) -> None:
-        label = f"built-in module {module!r}"
-        if label in self._errors:
-            return
-        try:
-            importlib.import_module(module)
-        except Exception as exc:
-            self._fail(label, exc)
-
-    def _fail(self, label: str, exc: Exception) -> None:
-        self._errors[label] = f"{type(exc).__name__}: {exc}"
-        print(f"[pyTEMlib.analysis_server.registry] {self.group}: could not load {label}: {self._errors[label]}", file=sys.stderr)

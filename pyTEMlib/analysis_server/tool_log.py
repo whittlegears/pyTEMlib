@@ -9,8 +9,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fastmcp.server.dependencies import get_http_headers
+
 from . import environment
 from .fileio import SequencedAppender
+from .names import CALLER_HEADER, RUN_HEADER
 
 RESULT_PREVIEW_CHARS = 500
 
@@ -30,6 +33,16 @@ def _appender(path: Path) -> SequencedAppender:
     """An appender for ``path`` that rotates as the environment says (``ASYNCROSCOPY_LOG_ROTATE_BYTES``, ``_KEEP``)."""
     env = environment.get()
     return SequencedAppender(path, rotate_bytes=env.log_rotate_bytes, keep=env.log_rotate_keep)
+
+
+def caller_and_run() -> tuple[str | None, str | None]:
+    """The calling agent and its run, from the X-Asyncroscopy-Caller and X-Asyncroscopy-Run headers agents send;
+    (None, None) outside an HTTP request."""
+    try:
+        headers = {k.lower(): v for k, v in (get_http_headers(include_all=True) or {}).items()}
+    except Exception:
+        return None, None
+    return headers.get(CALLER_HEADER.lower()) or None, headers.get(RUN_HEADER.lower()) or None
 
 
 class ToolCallLog:

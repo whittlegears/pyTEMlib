@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .fileio import file_lock
+from .tool_log import caller_and_run
 
 SHAPES = {
     "pin": ("x", "y"),
@@ -251,8 +252,6 @@ def register(mcp, store: AnnotationStore, dataset_key: Callable[[str], str | Non
     or None when there is no such dataset; ``sample_of(key)`` the sample_id and sample_load_id it recorded."""
 
     def who(reported_by: str | None) -> tuple[str | None, str | None]:
-        from .server import caller_and_run
-
         caller, run = caller_and_run()
         return caller or (reported_by.strip() if isinstance(reported_by, str) and reported_by.strip() else None), run
 

@@ -4,7 +4,7 @@ pyTEMlib's tools (``pyTEMlib.mcp_analysis``) take a dataset reference and read i
 resolver to them: a reference ``key`` or ``key#path`` that names something in the Tiled catalogue becomes a
 sidpy dataset with the dimensions, units and data type the acquisition recorded:
 
-* an array with an energy scale (any naming ``views.energy_axis`` reads) is a SPECTRUM, or a SPECTRAL_IMAGE when it
+* an array with an energy scale (any naming ``stored.energy_axis`` reads) is a SPECTRUM, or a SPECTRAL_IMAGE when it
   has positions before its channels;
 * a 2-D array is an IMAGE, a 3-D one an IMAGE_STACK (frames first); with ``pixel_size_m`` its axes are in nm,
   without it in pixels;
@@ -18,18 +18,20 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+import h5py
 import numpy as np
 import sidpy
 
-from . import stored as views
+from pyTEMlib import mcp_analysis
+from pyTEMlib.image_tools import experiment_from_asyncroscopy
+
+from . import stored
 
 MAX_BYTES = 1 << 30
 
 
 def _refuse(code: str, message: str) -> Exception:
-    from pyTEMlib.mcp_analysis import AnalysisError
-
-    return AnalysisError(code, message)
+    return mcp_analysis.AnalysisError(code, message)
 
 
 def _pixel_nm(attrs: dict) -> float | None:
@@ -48,8 +50,6 @@ def _spatial(size: int, name: str, pixel_nm: float | None) -> sidpy.Dimension:
 
 
 def _experiment(attrs: dict) -> dict:
-    from pyTEMlib.image_tools import experiment_from_asyncroscopy
-
     experiment = experiment_from_asyncroscopy(attrs)
     for name in ("acceleration_voltage_v", "acceleration_voltage", "high_tension_v"):
         try:
@@ -60,7 +60,7 @@ def _experiment(attrs: dict) -> dict:
     return experiment
 
 
-def to_sidpy(ds: views.Dataset) -> sidpy.Dataset:
+def to_sidpy(ds: stored.Dataset) -> sidpy.Dataset:
     """The sidpy dataset of one stored array, read whole (refused above ``MAX_BYTES``)."""
     if ds.family != "array":
         raise _refuse("not_an_array", f"{ds.name} is a {ds.family}, not an array pyTEMlib can analyse")
@@ -70,7 +70,7 @@ def to_sidpy(ds: views.Dataset) -> sidpy.Dataset:
     values = np.asarray(ds.node.read(), dtype=float)
     while values.ndim > 1 and values.shape[0] == 1:
         values = values[0]
-    energy = views.energy_axis(ds.attrs) or views.energy_axis(ds.parent_attrs)
+    energy = stored.energy_axis(ds.attrs) or stored.energy_axis(ds.parent_attrs)
     pixel_nm = _pixel_nm(attrs)
     dataset = sidpy.Dataset.from_array(values, title=ds.name)
     if energy is not None:
@@ -114,8 +114,6 @@ _installed: list[Callable[[str], sidpy.Dataset | None]] = []
 def install(client: Callable[[], Any], local_roots: list | None) -> None:
     """Make pyTEMlib's analysis tools in this process read Tiled keys from ``client()`` and files only under
     ``local_roots`` (None: no files). Installing again replaces the previous resolver."""
-    from pyTEMlib import mcp_analysis
-
     for previous in _installed:
         if previous in mcp_analysis._resolvers:
             mcp_analysis._resolvers.remove(previous)
@@ -130,8 +128,6 @@ _ASYNCROSCOPY_MARKS = ("acquisition_type", "pixel_size_m", "energy_offset_ev", "
 
 
 def _written_by_asyncroscopy(h5) -> bool:
-    import h5py
-
     if any(mark in h5.attrs for mark in _ASYNCROSCOPY_MARKS):
         return True
     found = []
@@ -144,8 +140,6 @@ def h5_resolver(check_allowed: Callable[[str], None]) -> Callable[[str], sidpy.D
     wrote, read with the same rules as a Tiled key. Other HDF5 files (NSID, Nion) are left to pyTEMlib (None)."""
 
     def resolve(reference: str) -> sidpy.Dataset | None:
-        import h5py
-
         if not isinstance(reference, str):
             return None
         path, _, name = reference.strip().rpartition("#") if "#" in reference and not os.path.exists(reference) else (reference.strip(), "", "")
@@ -164,9 +158,9 @@ def h5_resolver(check_allowed: Callable[[str], None]) -> Callable[[str], sidpy.D
             if name not in h5 or not isinstance(h5[name], h5py.Dataset):
                 raise _refuse("unknown_key", f"{path} has no dataset {name!r}")
             node = h5[name]
-            loaded = views._Loaded(np.asarray(node), {**dict(h5.attrs), **dict(node.attrs)})
-            parent = {str(k): views._decode(v) for k, v in dict(node.parent.attrs).items()}
-            return to_sidpy(views.as_dataset(loaded, os.path.basename(path), name, parent))
+            loaded = stored._Loaded(np.asarray(node), {**dict(h5.attrs), **dict(node.attrs)})
+            parent = {str(k): stored._decode(v) for k, v in dict(node.parent.attrs).items()}
+            return to_sidpy(stored.as_dataset(loaded, os.path.basename(path), name, parent))
 
     return resolve
 
@@ -189,7 +183,7 @@ def tiled_resolver(client: Callable[[], Any]) -> Callable[[str], sidpy.Dataset |
         except Exception:
             return None
         try:
-            ds = views.pick(node, key, path or None)
+            ds = stored.pick(node, key, path or None)
         except ValueError as exc:
             raise _refuse("unknown_key", str(exc)) from None
         return to_sidpy(ds)
