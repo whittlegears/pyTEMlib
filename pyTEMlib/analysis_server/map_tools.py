@@ -303,8 +303,12 @@ class MapTools:
         if not (a.std() > 0 and b.std() > 0):
             return {**asked, "matched": False, "score": None, "reason": "an image is blank"}
         bound = min((float(search_m) if search_m else 0.1 * float(fov_m)) / pixel, 0.6 * min(height, width))
-        shift = pair_shift(a, b, predicted, bound, (height, width), MATCH_MIN_OVERLAP_PX)
+        report: dict = {}
+        shift = pair_shift(a, b, predicted, bound, (height, width), MATCH_MIN_OVERLAP_PX, report=report)
         if shift is None:
+            if report.get("aliased"):
+                return {**asked, "matched": False, "score": None,
+                        "reason": "the overlap repeats (a lattice): the correlation has several peaks nearly as high, so the match could be a period off"}
             return {**asked, "matched": False, "score": None, "reason": "no clear match in the overlap"}
         dr, dc = int(round(shift[0])), int(round(shift[1]))
         r0, r1, c0, c1 = max(0, dr), min(a.shape[0], dr + b.shape[0]), max(0, dc), min(a.shape[1], dc + b.shape[1])
@@ -489,7 +493,7 @@ class MapTools:
             "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
             "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
             "points_of_interest": self.store.poi_count(map_key),
-            "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "unplaced_tiles", "scan_linear", "tile_gain", "drift", "drift_unmeasured") if k in meta},
+            "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "unplaced_tiles", "scan_linear", "aliased_pairs", "tile_gain", "drift", "drift_unmeasured") if k in meta},
             "id": meta.get("id"), "stitched_at": meta.get("stitched_at"), "inputs_sha256": meta.get("inputs_sha256"),
         }
         if meta.get("run"):

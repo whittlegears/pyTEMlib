@@ -8,7 +8,7 @@ import pytest
 from scipy import ndimage
 
 from pyTEMlib.image_tools import image_mosaic as mosaic
-from pyTEMlib.image_tools.image_mosaic import Tile, assemble, estimate_scan_linear, register_tiles, solve_gain_offset, stitch_to_arrays
+from pyTEMlib.image_tools.image_mosaic import Tile, assemble, estimate_scan_linear, register_tiles, solve_gain_offset, stitch_quality, stitch_to_arrays
 
 from pyTEMlib.image_tools.image_utilities import get_pixel_size_m, pixel_to_stage
 
@@ -163,13 +163,16 @@ def test_wrong_matches_are_dropped_by_the_robust_solve():
     assert len(bad & {id(m) for m in used}) <= 0.1 * len(bad)
 
 
-def test_the_drift_is_recovered_and_the_placement_is_under_a_pixel_on_a_textured_sample():
-    run = SyntheticRun(16, 64, 0.3, 0.05, 0.05, 7, density=2e-3)
+@pytest.mark.parametrize("seed", [3, 7, 11, 19])
+def test_the_drift_is_recovered_and_the_placement_is_under_a_pixel_on_a_textured_sample(seed):
+    run = SyntheticRun(16, 64, 0.3, 0.05, 0.05, seed, density=2e-3)
     tiles = [run[k] for k in range(len(run))]
     placement = mosaic.register_tiles(tiles, stage_sigma_m=0.05 * 64 * PIXEL, max_drift_m_per_s=0.15 * PIXEL)
     true_total = run.drift[-1] - run.drift[0]
     fitted_total = -(placement.drift_px[-1] - placement.drift_px[0])
-    assert np.hypot(*(fitted_total - true_total)) < 0.1 * np.hypot(*true_total)
+    # 3-12 % across these seeds, with or without the lattice guard (the old 10 % limit only fitted seed 7, and
+    # seed 19 failed it with the guard off too); a missed second matching pass gives about 20 % or more.
+    assert np.hypot(*(fitted_total - true_total)) < 0.15 * np.hypot(*true_total)
     assert errors(placement.positions_px, run.truth)["median_px"] < 1.0
     assert placement.solver["converged"]
 
@@ -329,6 +332,101 @@ def test_a_detector_drifting_in_time_is_followed_smoothly_and_not_invented_where
     steady = [Tile(t.image, t.stage_xy_m, t.pixel_size_m, t.index, acquired_s=float(s)) for t, s in zip(tiles, times)]
     placement = register_tiles(steady, stage_sigma_m=2 * PIXEL)
     assert np.all(np.abs(placement.gains - 1.0) < 0.01)  # nothing invented on a steady detector
+
+
+def _lattice_scene(size=720, period=7.3, angle_deg=12.0, features=40, feature_share=5.0, seed=0):
+    """Atom columns on a square lattice (period px, turned angle_deg) with a few sparse blurred blobs on top:
+    an atomic-resolution image whose overlaps correlate almost as well a lattice vector off as at the truth."""
+    rng = np.random.default_rng(seed)
+    rows, cols = np.mgrid[:size, :size].astype(float)
+    t = np.deg2rad(angle_deg)
+    u = (rows * np.cos(t) + cols * np.sin(t)) / period
+    v = (-rows * np.sin(t) + cols * np.cos(t)) / period
+    image = (np.cos(2 * np.pi * u) + 1) ** 3 * (np.cos(2 * np.pi * v) + 1) ** 3 / 64.0
+    blobs = np.zeros((size, size))
+    blobs[rng.integers(0, size, features), rng.integers(0, size, features)] = 1.0
+    blobs = ndimage.gaussian_filter(blobs, 6.0)
+    return 100 * (image + feature_share * blobs / blobs.max()) + 20
+
+
+def _lattice_tiles(grid=3, overlap=0.25, noise=0.05, seed=0, **scene_args):
+    """Tiles of _lattice_scene at exact stage positions (no scan distortion), each with its own noise."""
+    image = _lattice_scene(seed=seed, **scene_args)
+    rng = np.random.default_rng(seed + 1)
+    step = int(round(TILE * (1 - overlap)))
+    tiles, truth = [], []
+    for r in range(grid):
+        for c in range(grid):
+            top_left = np.array([20 + r * step, 20 + c * step], dtype=float)
+            crop = image[int(top_left[0]) : int(top_left[0]) + TILE, int(top_left[1]) : int(top_left[1]) + TILE]
+            crop = crop + rng.normal(0, noise * image.std(), crop.shape)
+            tiles.append(Tile(crop, ((top_left[1] + TILE / 2) * PIXEL, (top_left[0] + TILE / 2) * PIXEL), PIXEL, len(tiles)))
+            truth.append(top_left)
+    return tiles, np.array(truth)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 5])
+def test_a_small_lattice_map_gets_no_invented_scan_turn(seed):
+    # A 3 x 3 map of a lattice at the stage's exact positions, stage error stated as 5 % of the field of view.
+    # Matches locked a lattice period off used to bend the solve, and the 9 tiles' tiny residuals made the bend look
+    # like a significant scan turn, which was then applied and moved tiles many pixels.
+    tiles, truth = _lattice_tiles(seed=seed)
+    placement = register_tiles(tiles, stage_sigma_m=0.05 * TILE * PIXEL)
+    assert np.allclose(placement.linear, np.eye(2))  # nothing applied
+    assert errors(placement.positions_px, truth)["max_px"] <= 1.0
+    quality = stitch_quality(placement)
+    assert quality["aliased_pairs"] > 0  # the ambiguous lattice pairs are reported, not used
+    assert quality["scan_linear"]["applied"] is False
+
+
+def test_a_lattice_overlap_is_flagged_as_ambiguous_and_a_textured_one_is_not():
+    lattice = _lattice_scene(feature_share=0.0)
+    a, b = lattice[:256, :256], lattice[:256, 192:448]
+    report = {}
+    assert mosaic.pair_shift(a, b, np.array([0.0, 192.0]), 38.0, (256, 64), report=report) is None
+    assert report["aliased"] and report["second_peak_ratio"] > mosaic.ALIAS_RATIO
+    textured = scene()
+    report = {}
+    shift = mosaic.pair_shift(textured[:256, :256], textured[:256, 192:448], np.array([0.0, 192.0]), 38.0, (256, 64), report=report)
+    assert shift is not None and np.allclose(shift, [0.0, 192.0], atol=0.3)
+    assert not report.get("aliased") and report["second_peak_ratio"] < mosaic.ALIAS_RATIO
+
+
+def test_a_few_exactly_placed_tiles_bent_one_way_are_not_read_as_a_scan_distortion():
+    grid = np.array([[r, c] for r in range(3) for c in range(3)], dtype=float) * 192.0
+    bent = grid @ np.array([[1.0, 0.008], [-0.008, 1.0]]).T  # the tiles' own errors, all one way, no scatter
+    assert not estimate_scan_linear(grid, bent, np.ones(9, bool))[2]  # 9 tiles are too few to say
+    rng = np.random.default_rng(0)
+    grid = np.array([[r, c] for r in range(5) for c in range(5)], dtype=float) * 192.0
+    bent = grid @ np.array([[1.0, 0.003], [-0.003, 1.0]]).T + rng.normal(0, 0.05, grid.shape)
+    assert estimate_scan_linear(grid, bent, np.ones(25, bool))[2]  # read from the residuals alone it looks real
+    assert not estimate_scan_linear(grid, bent, np.ones(25, bool), stage_sigma_px=12.8)[2]  # not beyond the stage's error
+
+
+def test_a_real_scan_turn_on_a_larger_map_is_still_measured_and_undone():
+    image = scene(size=1500, blobs=1200)
+    angle = np.deg2rad(1.5)
+    turn = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    rng = np.random.default_rng(6)
+    tiles = []
+    for r in range(5):
+        for c in range(5):
+            centre = np.array([300 + r * 200, 300 + c * 200], dtype=float)
+            u = np.arange(TILE) - (TILE - 1) / 2
+            grid_r, grid_c = np.meshgrid(u, u, indexing="ij")
+            # The scan is turned 1.5 degrees against the stage: tile pixel (u, v) sees the sample at centre + turn @ (u, v).
+            rows = centre[0] + turn[0, 0] * grid_r + turn[0, 1] * grid_c
+            cols = centre[1] + turn[1, 0] * grid_r + turn[1, 1] * grid_c
+            tile = ndimage.map_coordinates(image, [rows, cols], order=3) + rng.normal(0, 1.0, (TILE, TILE))
+            reported = centre + rng.normal(0, 1.0, 2)
+            tiles.append(Tile(tile, ((reported[1] + 0.5) * PIXEL, (reported[0] + 0.5) * PIXEL), PIXEL, len(tiles)))
+    # Stated stage error 5 px (true 1 px): 25 tiles 200 px apart know the turn to about 0.2 degree (3 standard errors).
+    placement = register_tiles(tiles, stage_sigma_m=5 * PIXEL)
+    assert not np.allclose(placement.linear, np.eye(2))  # applied
+    assert np.allclose(placement.linear, np.linalg.inv(turn), atol=2e-3)  # and measured right
+    centres = placement.centres_px(np.full((25, 2), TILE)).reshape(5, 5, 2)
+    assert np.allclose(np.diff(centres[:, :, 1], axis=1), 200.0, atol=1.0)  # the stage's spacing, not the turned images'
+    assert np.allclose(np.diff(centres[:, :, 0], axis=1), 0.0, atol=1.0)
 
 
 def test_a_calibrated_scan_is_undone_on_a_map_too_small_to_measure_it():

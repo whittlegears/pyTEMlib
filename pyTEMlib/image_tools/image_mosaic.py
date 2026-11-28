@@ -83,7 +83,13 @@ LINK_CONFIDENCE = 0.7  # one link alone may join two groups of tiles only this c
 DIRECT_SOLVE_MAX = 400_000  # unknowns solved directly; more use lsqr
 LSQR_ITERATIONS = 50_000
 LINEAR_SIGNIFICANCE = 3.0  # the scan's shared distortion is removed only when measured this many standard errors from none
-LINEAR_MIN_TILES = 9
+LINEAR_MIN_TILES = 16  # fewer matched tiles than this never measure the scan's distortion (a 4 x 4 map at the least)
+# A correlation whose second peak is this high next to the first (both above the surface's median) is ambiguous: on
+# lattice-dominated synthetic overlaps the matches a lattice vector off had a second peak of 0.92 or more, the right
+# ones mostly under 0.9; overlaps of non-periodic texture stayed under 0.85.
+ALIAS_RATIO = 0.9
+ALIAS_MIN_SIDE_PEAKS = 2  # a lattice shows at least two side peaks near the main one's height
+ALIAS_EXCLUDE_PX = 2.0  # local maxima this close to the main peak are its own ripples, not a second peak
 GAIN_MIN_OVERLAP_PX = 16  # a shared area narrower than this says too little about two tiles' brightness
 GAIN_PRIOR_SIGMA = 0.1  # a detector's gain is expected within about 10 % of nominal (offsets: 10 % of the signal level)
 GAIN_RATE_SHARE = 0.2  # ...and to change by at most a fifth of that between two knots
@@ -196,6 +202,8 @@ class Placement:
     linear_stderr: np.ndarray | None = None
     gains: np.ndarray | None = None  # (n,) drawn value = gain * counts + offset (see solve_gain_offset)
     offsets: np.ndarray | None = None
+    # (i, j) pairs not matched because their correlation repeats (a lattice; see bounded_shift); None without matching
+    aliased_pairs: list[tuple[int, int]] | None = None
 
     def centres_px(self, shapes: np.ndarray) -> np.ndarray:
         """(n, 2) canvas (row, col) of each tile's centre."""
@@ -382,12 +390,46 @@ def _cross_correlate_masked(fixed: np.ndarray, moving: np.ndarray, overlap_ratio
     return out
 
 
-def bounded_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px: float, overlap_ratio: float) -> np.ndarray | None:
+def _second_peak_ratio(window: np.ndarray, peak: tuple[int, int]) -> float:
+    """Height of the highest other peak of a correlation surface over the main one's, both above the surface median.
+
+    Near 1 on a periodic overlap (a crystal lattice): every lattice vector gives a peak about as high as the true
+    one, and noise decides which is highest. Only interior local maxima farther than ALIAS_EXCLUDE_PX from the main
+    peak count (a slope rising out of the window is not a peak).
+    """
+    finite = np.where(np.isfinite(window), window, -np.inf)
+    base = float(np.median(window[np.isfinite(window)]))
+    top = float(finite[peak]) - base
+    if not top > 0:
+        return 0.0
+    local = ndimage.maximum_filter(finite, size=3, mode="nearest") == finite
+    local[[0, -1], :] = False
+    local[:, [0, -1]] = False
+    rows, cols = np.nonzero(local)
+    far = np.hypot(rows - peak[0], cols - peak[1]) > ALIAS_EXCLUDE_PX
+    if not far.any():
+        return 0.0
+    heights = np.sort((finite[rows[far], cols[far]] - base) / top)[::-1]
+    # A lattice gives a grid of side peaks about as high as the main one; a chance
+    # peak on sparse texture is alone. Report the second-highest side peak, so one
+    # stray peak alone never counts as aliasing.
+    return max(0.0, float(heights[1])) if len(heights) >= ALIAS_MIN_SIDE_PEAKS else 0.0
+
+
+def bounded_shift(
+    a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px: float, overlap_ratio: float,
+    alias_ratio: float | None = None, report: dict | None = None,
+) -> np.ndarray | None:
     """Position of b relative to a (row, col), searched only within ``bound_px`` of ``predicted``.
 
     Masked normalised cross-correlation over the whole (partial) overlap, with
     the peak taken inside the bound and refined to subpixel by a parabola. A
     peak on the edge of the bound means the true one may lie outside it: None.
+    A second peak within the bound at least ``alias_ratio`` as high as the main
+    one (a periodic overlap, such as a crystal lattice, where the match may be a
+    lattice vector off) is ambiguous: None, and ``report["aliased"]`` is set.
+    ``alias_ratio`` None means ALIAS_RATIO; infinity turns the check off.
+    ``report["second_peak_ratio"]`` records the ratio whenever it is measured.
     """
     xcorr = _cross_correlate_masked(b, a, overlap_ratio)
     # Index k of xcorr is the shift (shape - 1 - k) of b relative to a.
@@ -402,6 +444,15 @@ def bounded_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound_px:
     peak = np.unravel_index(int(np.nanargmax(window)), window.shape)
     if peak[0] in (0, window.shape[0] - 1) or peak[1] in (0, window.shape[1] - 1):
         return None
+    alias_ratio = ALIAS_RATIO if alias_ratio is None else alias_ratio
+    if np.isfinite(alias_ratio):
+        ratio = _second_peak_ratio(window, peak)
+        if report is not None:
+            report["second_peak_ratio"] = ratio
+        if ratio >= alias_ratio:
+            if report is not None:
+                report["aliased"] = True
+            return None
     sub = []
     for axis in range(2):
         step = np.zeros(2, int)
@@ -418,7 +469,8 @@ def _halve(image: np.ndarray) -> np.ndarray:
     return image[:rows, :cols].reshape(rows // 2, 2, cols // 2, 2).mean(axis=(1, 3))
 
 
-def _cropped_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: float, overlap_px: float, scale: int = 1) -> np.ndarray | None:
+def _cropped_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: float, overlap_px: float, scale: int = 1,
+                   report: dict | None = None) -> np.ndarray | None:
     """bounded_shift over only the predicted overlap plus the bound on each side (the rest of each tile cannot meet
     the other within the bound), the crops reduced ``scale`` times; returns the shift in full pixels."""
     (ca, oa), (cb, ob) = _overlap_crops(a.shape, b.shape, predicted, bound)
@@ -426,11 +478,12 @@ def _cropped_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: f
     for _ in range(scale.bit_length() - 1):
         a_part, b_part = _halve(a_part), _halve(b_part)
     overlap_ratio = 0.5 * min(overlap_px / scale**2 / a_part.size, overlap_px / scale**2 / b_part.size)
-    shift = bounded_shift(a_part, b_part, (predicted + ob - oa) / scale, bound / scale, min(overlap_ratio, 1.0))
+    shift = bounded_shift(a_part, b_part, (predicted + ob - oa) / scale, bound / scale, min(overlap_ratio, 1.0), report=report)
     return None if shift is None else shift * scale - ob + oa
 
 
-def pair_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: float, overlap: tuple[int, int], min_overlap_px: int = 16) -> np.ndarray | None:
+def pair_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: float, overlap: tuple[int, int], min_overlap_px: int = 16,
+               report: dict | None = None) -> np.ndarray | None:
     """b's position relative to a (row, col), searched within ``bound`` of ``predicted``.
 
     A wide search is made coarse to fine: the masked correlation of the two overlaps at half resolution finds the
@@ -438,11 +491,14 @@ def pair_shift(a: np.ndarray, b: np.ndarray, predicted: np.ndarray, bound: float
     within FINE_REACH_PX of it gives the sub-pixel position (three times faster than one full-resolution search,
     and as accurate: 0.163 against 0.162 px on the twin's tiles). A narrow search, or an overlap too thin to halve
     (under COARSE_MIN_OVERLAP_PX across), is made in one step.
+
+    A correlation with a second peak nearly as high as the first (a crystal lattice in the overlap) gives None, and
+    ``report["aliased"]`` (when a dict is passed) is set: see ``bounded_shift``.
     """
     overlap_px = float(overlap[0] * overlap[1])
     if bound <= COARSE_FROM_PX or min(overlap) < COARSE_MIN_OVERLAP_PX:
-        return _cropped_shift(a, b, predicted, bound, overlap_px)
-    rough = _cropped_shift(a, b, predicted, bound, overlap_px, scale=2)
+        return _cropped_shift(a, b, predicted, bound, overlap_px, report=report)
+    rough = _cropped_shift(a, b, predicted, bound, overlap_px, scale=2, report=report)
     if rough is None:
         return None
     centre = np.round(rough).astype(int)
@@ -494,6 +550,7 @@ def pairwise_offsets(
     stage_sigma_px: float | None = None,
     max_drift_px_per_s: float = 0.0,
     min_confidence: float = 0.3,
+    info: dict | None = None,
 ) -> list[PairMatch]:
     """Measure how far each overlapping pair is from where the stage put it, within a bound.
 
@@ -504,6 +561,10 @@ def pairwise_offsets(
 
     ``on_pair(done, total)`` is called before each overlapping pair is matched
     and once at the end; it may raise (e.g. a job's abort) to stop early.
+
+    A pair whose correlation has a second peak nearly as high as the first (a
+    periodic overlap, see ``bounded_shift``) is not returned; when ``info`` is a
+    dict, ``info["aliased_pairs"]`` lists those pairs as (i, j).
     """
     shapes = tile_arrays(tiles)["shapes"]
     pairs = overlapping_pairs(positions, shapes, min_overlap_px)
@@ -515,6 +576,7 @@ def pairwise_offsets(
     times = _times(tiles)
     sigma = max(stage_sigma_px, MIN_STAGE_SIGMA_PX) if stage_sigma_px is not None else 0.1 * float(np.median(shapes))
     matches: list[PairMatch] = []
+    aliased: list[tuple[int, int]] = []
     # A tile is in up to eight pairs: its float64 copy and whether it is blank are made once, and
     # kept (least recently used dropped first) while the pairs of its strip and row are matched.
     floats: OrderedDict[int, tuple[np.ndarray, bool]] = OrderedDict()
@@ -545,8 +607,11 @@ def pairwise_offsets(
             dt = abs(times[j] - times[i]) if times is not None else 0.0
             bound = 4.0 * np.sqrt(2.0) * sigma + max_drift_px_per_s * dt + 2.0
         bound = min(bound, 0.6 * min(height, width))
-        shift = pair_shift(a, b, predicted, bound, (height, width), min_overlap_px)
+        report: dict = {}
+        shift = pair_shift(a, b, predicted, bound, (height, width), min_overlap_px, report=report)
         if shift is None:
+            if report.get("aliased"):
+                aliased.append((int(i), int(j)))
             continue
         confidence = _overlap_ncc(a, b, shift, min_overlap_px)
         if confidence is None or confidence < min_confidence:
@@ -554,6 +619,8 @@ def pairwise_offsets(
         matches.append(PairMatch(i, j, shift - predicted, confidence))
     if on_pair is not None:
         on_pair(len(pairs), len(pairs))
+    if info is not None:
+        info["aliased_pairs"] = aliased
     return matches
 
 
@@ -859,7 +926,8 @@ def register_tiles(
     sigma_px = stage_sigma_m / pixel
     drift_px_s = max_drift_m_per_s / pixel
     times = _times(tiles)
-    matches = pairwise_offsets(tiles, stage_px, on_pair=on_pair, stage_sigma_px=sigma_px, max_drift_px_per_s=drift_px_s, min_confidence=min_confidence) if refine else []
+    matching: dict = {}
+    matches = pairwise_offsets(tiles, stage_px, on_pair=on_pair, stage_sigma_px=sigma_px, max_drift_px_per_s=drift_px_s, min_confidence=min_confidence, info=matching) if refine else []
     knots, drift = None, None
     info: dict = {}
     if matches:
@@ -870,7 +938,7 @@ def register_tiles(
             # pushed the true offset past the window, and those are the pairs that say most about
             # the drift: without this pass the fitted drift is biased low on long maps.
             expected = stage_px + _drift_at(times, knots, drift)
-            matches = pairwise_offsets(tiles, expected, on_pair=on_pair, stage_sigma_px=sigma_px, max_drift_px_per_s=0.0, min_confidence=min_confidence)
+            matches = pairwise_offsets(tiles, expected, on_pair=on_pair, stage_sigma_px=sigma_px, max_drift_px_per_s=0.0, min_confidence=min_confidence, info=matching)
             correction = expected - stage_px
             for m in matches:
                 m.offset_px = m.offset_px + (correction[m.j] - correction[m.i])  # relative to the stage again, as the solve expects
@@ -890,7 +958,7 @@ def register_tiles(
             if scan_linear is not None:
                 scale = np.asarray(scan_linear, dtype=np.float64).reshape(2, 2)
             else:
-                scale, _stderr, trusted = estimate_scan_linear(corrected + half, positions + half, matched_now)
+                scale, _stderr, trusted = estimate_scan_linear(corrected + half, positions + half, matched_now, sigma_px)
                 if not (trusted and _linear_matters(scale, half * 2 + 1)):
                     break
             centre = (stage_px + half).mean(axis=0)
@@ -914,7 +982,7 @@ def register_tiles(
     gains, offsets = solve_gain_offset(tiles, positions, [m for m in matches if m.used])
     # Against the stage plus the fitted drift: in a raster, drift grows with position and would look like a stretch.
     expected = stage_px + _drift_at(times, knots, drift) if drift is not None else stage_px
-    linear, linear_stderr, applied = estimate_scan_linear(expected + (shapes - 1) / 2.0, positions + (shapes - 1) / 2.0, matched)
+    linear, linear_stderr, applied = estimate_scan_linear(expected + (shapes - 1) / 2.0, positions + (shapes - 1) / 2.0, matched, sigma_px)
     estimate = linear
     applied = applied and _linear_matters(linear, shapes)
     if scan_linear is not None:
@@ -923,7 +991,7 @@ def register_tiles(
         # The tiles' own pixels are stretched and turned relative to the stage (field-of-view calibration, scan
         # rotation, shear): put the tile centres back on the stage's scale; assembly resamples each tile to match.
         centres = positions + (shapes - 1) / 2.0
-        middle = centres[matched].mean(axis=0)
+        middle = centres[matched].mean(axis=0) if matched.any() else centres.mean(axis=0)  # a given calibration, no match
         positions = (centres - middle) @ np.linalg.inv(linear).T + middle - (shapes - 1) / 2.0
     corners = _footprint_corners(linear if applied else np.eye(2), shapes)
     # Shift so the canvas starts at (0, 0), and move the origin with it.
@@ -935,6 +1003,7 @@ def register_tiles(
     return Placement(
         positions, stage_px, matches, canvas, origin, pixel, fallback=~matched if refine else None, drift_times_s=knots, drift_px=drift,
         solver=info or None, linear=linear if applied else np.eye(2), linear_estimate=estimate, linear_stderr=linear_stderr, gains=gains, offsets=offsets,
+        aliased_pairs=matching.get("aliased_pairs") if refine else None,
     )
 
 
@@ -947,24 +1016,49 @@ def _footprint_corners(linear: np.ndarray, shapes: np.ndarray) -> tuple[np.ndarr
     return reach.min(axis=0), reach.max(axis=0)
 
 
-def estimate_scan_linear(stage_centres: np.ndarray, centres: np.ndarray, matched: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+def estimate_scan_linear(
+    stage_centres: np.ndarray, centres: np.ndarray, matched: np.ndarray, stage_sigma_px: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, bool]:
     """The scan's own geometry against the stage's: the 2 x 2 map A with tile centres = A @ stage centres + b.
 
     Measured from the matched tiles, whose centres follow their images: a field-of-view calibration error
     stretches A, scan rotation turns it, shear skews it. The stage's random error averages out over many
-    tiles, so A is only trusted (``applied``) when it differs from no distortion by more than
-    LINEAR_SIGNIFICANCE standard errors; a small map leaves it alone. Returns (A, standard errors, applied).
+    tiles, so A is only trusted (``applied``) when at least LINEAR_MIN_TILES tiles are matched and it differs
+    from no distortion by more than LINEAR_SIGNIFICANCE standard errors; a small map leaves it alone.
+
+    The standard errors come from the scatter of the residuals about the fit, robustly (the larger of the
+    usual estimate and 1.4826 times the median absolute residual), and never from less scatter than the
+    stage's stated ``stage_sigma_px``: on a stage reported as exact the residuals of a few tiles can be tiny
+    while the tiles' own errors (a match locked a lattice period off, say) bend them all one way, and a
+    distortion that the stage's accuracy cannot show must not be read from them. Tiles whose residual is far
+    beyond the rest are left out of the fit once. Returns (A, standard errors, applied).
     """
     identity = np.eye(2)
+    matched = np.asarray(matched, bool).copy()
     n = int(matched.sum())
-    if n < LINEAR_MIN_TILES:
+    if n < max(LINEAR_MIN_TILES, 4):
         return identity, np.full((2, 2), np.inf), False
-    # The stage readings carry the noise and the tile centres hardly any, so the stage is regressed on the centres
-    # (noise in the regressor would shrink the fitted slope toward zero) and the result inverted.
-    design = np.hstack([centres[matched], np.ones((n, 1))])
-    coef, *_ = np.linalg.lstsq(design, stage_centres[matched], rcond=None)
-    residual = stage_centres[matched] - design @ coef
+
+    def fit(use):
+        # The stage readings carry the noise and the tile centres hardly any, so the stage is regressed on the
+        # centres (noise in the regressor would shrink the fitted slope toward zero) and the result inverted.
+        design = np.hstack([centres[use], np.ones((int(use.sum()), 1))])
+        coef, *_ = np.linalg.lstsq(design, stage_centres[use], rcond=None)
+        return design, coef, stage_centres[use] - design @ coef
+
+    matched = np.array(matched, dtype=bool, copy=True)  # the outlier refit below must not change the caller's mask
+    design, coef, residual = fit(matched)
+    distance = np.hypot(*residual.T)
+    spread = 1.4826 * float(np.median(np.abs(distance - np.median(distance))))
+    outlying = distance > max(float(np.median(distance)) + 5.0 * spread, 1.0)
+    if outlying.any() and n - int(outlying.sum()) >= LINEAR_MIN_TILES:
+        matched[np.nonzero(matched)[0][outlying]] = False
+        n = int(matched.sum())
+        design, coef, residual = fit(matched)
     variance = (residual**2).sum(axis=0) / max(n - 3, 1)  # per output axis
+    robust = (1.4826 * np.median(np.abs(residual - np.median(residual, axis=0)), axis=0)) ** 2
+    floor = 0.0 if stage_sigma_px is None else float(stage_sigma_px) ** 2
+    variance = np.maximum(np.maximum(variance, robust), floor)
     unscaled = np.diag(np.linalg.pinv(design.T @ design))[:2]
     stderr = np.sqrt(np.outer(variance, unscaled))  # of the stage-from-tile map; A is near identity, so A's are the same
     linear = np.linalg.inv(coef[:2].T)
@@ -1278,7 +1372,9 @@ def stitch_quality(placement: Placement) -> dict:
         residual of the used matches in pixels; ``fallback_tiles`` (unplaced, drawn only
         where no placed tile is) and the first UNPLACED_LISTED ``unplaced_tiles``; the
         measured ``scan_linear`` and whether it was applied; the range of ``tile_gain``;
-        the ``solver`` record; and the fitted ``drift`` in metres when there was one
+        the ``solver`` record; the fitted ``drift`` in metres when there was one; and
+        ``aliased_pairs``, the number of overlapping pairs left unmatched because their
+        correlation repeats (a crystal lattice: the match could be a lattice period off)
     """
     used = [m for m in placement.matches if m.used]
     out = {"matches_used": len(used), "matches_found": len(placement.matches)}
@@ -1300,6 +1396,8 @@ def stitch_quality(placement: Placement) -> dict:
             "matrix": np.round(placement.linear_estimate, 6).tolist(),
             "stderr": np.round(placement.linear_stderr, 6).tolist(),
         }
+    if placement.aliased_pairs is not None:
+        out["aliased_pairs"] = len(placement.aliased_pairs)
     if placement.gains is not None:
         out["tile_gain"] = {"min": round(float(placement.gains.min()), 4), "max": round(float(placement.gains.max()), 4)}
     if placement.solver:
