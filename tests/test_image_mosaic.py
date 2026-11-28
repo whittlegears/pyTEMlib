@@ -1,6 +1,7 @@
 """Stitching (image_mosaic): placement against known tile positions, bounded matching, the drift model,
 the drawn map, and stitch_mosaic on sidpy datasets."""
 
+import json
 import tracemalloc
 
 import numpy as np
@@ -8,7 +9,7 @@ import pytest
 from scipy import ndimage
 
 from pyTEMlib.image_tools import image_mosaic as mosaic
-from pyTEMlib.image_tools.image_mosaic import Tile, assemble, estimate_scan_linear, register_tiles, solve_gain_offset, stitch_to_arrays
+from pyTEMlib.image_tools.image_mosaic import Tile, assemble, estimate_scan_linear, register_tiles, solve_gain_offset, stitch_quality, stitch_to_arrays
 
 from pyTEMlib.image_tools.image_utilities import get_pixel_size_m, pixel_to_stage
 
@@ -384,3 +385,14 @@ def test_stitch_mosaic_returns_a_calibrated_map_whose_pixels_sit_on_the_stage():
     first = np.round(placed["positions_px"][0]).astype(int)
     drawn = np.asarray(mosaic_dataset)[first[0] + 40 : first[0] + 80, first[1] + 40 : first[1] + 80]
     assert np.corrcoef(drawn.ravel(), np.asarray(datasets[0])[40:80, 40:80].ravel())[0, 1] > 0.98
+
+
+def test_a_map_too_small_to_measure_the_scan_reports_no_stderr_and_is_valid_json():
+    tiles, _truth = make_tiles(stage_error_px=0.0, grid=2)
+    assert len(tiles) < mosaic.LINEAR_MIN_TILES
+    for refine in (False, True):
+        quality = stitch_quality(register_tiles(tiles, refine=refine))
+        assert quality["scan_linear"]["stderr"] is None
+        json.dumps(quality, allow_nan=False)
+    datasets = [image_dataset(t.image, PIXEL, t.stage_xy_m, title=f"tile {k}") for k, t in enumerate(tiles)]
+    json.dumps(mosaic.stitch_mosaic(datasets, refine=False).metadata["mosaic"], allow_nan=False)

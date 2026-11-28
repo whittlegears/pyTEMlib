@@ -947,18 +947,19 @@ def _footprint_corners(linear: np.ndarray, shapes: np.ndarray) -> tuple[np.ndarr
     return reach.min(axis=0), reach.max(axis=0)
 
 
-def estimate_scan_linear(stage_centres: np.ndarray, centres: np.ndarray, matched: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+def estimate_scan_linear(stage_centres: np.ndarray, centres: np.ndarray, matched: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, bool]:
     """The scan's own geometry against the stage's: the 2 x 2 map A with tile centres = A @ stage centres + b.
 
     Measured from the matched tiles, whose centres follow their images: a field-of-view calibration error
     stretches A, scan rotation turns it, shear skews it. The stage's random error averages out over many
     tiles, so A is only trusted (``applied``) when it differs from no distortion by more than
-    LINEAR_SIGNIFICANCE standard errors; a small map leaves it alone. Returns (A, standard errors, applied).
+    LINEAR_SIGNIFICANCE standard errors; a small map leaves it alone. Returns (A, standard errors, applied);
+    with fewer than LINEAR_MIN_TILES matched tiles A is the identity and the standard errors are None.
     """
     identity = np.eye(2)
     n = int(matched.sum())
     if n < LINEAR_MIN_TILES:
-        return identity, np.full((2, 2), np.inf), False
+        return identity, None, False
     # The stage readings carry the noise and the tile centres hardly any, so the stage is regressed on the centres
     # (noise in the regressor would shrink the fitted slope toward zero) and the result inverted.
     design = np.hstack([centres[matched], np.ones((n, 1))])
@@ -1277,7 +1278,8 @@ def stitch_quality(placement: Placement) -> dict:
         ``matches_used`` and ``matches_found``; with matches, the median and 95th percentile
         residual of the used matches in pixels; ``fallback_tiles`` (unplaced, drawn only
         where no placed tile is) and the first UNPLACED_LISTED ``unplaced_tiles``; the
-        measured ``scan_linear`` and whether it was applied; the range of ``tile_gain``;
+        measured ``scan_linear``, whether it was applied, and its ``stderr`` (None when
+        fewer than LINEAR_MIN_TILES tiles matched to estimate it); the range of ``tile_gain``;
         the ``solver`` record; and the fitted ``drift`` in metres when there was one
     """
     used = [m for m in placement.matches if m.used]
@@ -1298,7 +1300,7 @@ def stitch_quality(placement: Placement) -> dict:
         out["scan_linear"] = {
             "applied": not np.allclose(placement.linear, np.eye(2)),
             "matrix": np.round(placement.linear_estimate, 6).tolist(),
-            "stderr": np.round(placement.linear_stderr, 6).tolist(),
+            "stderr": None if placement.linear_stderr is None else np.round(placement.linear_stderr, 6).tolist(),
         }
     if placement.gains is not None:
         out["tile_gain"] = {"min": round(float(placement.gains.min()), 4), "max": round(float(placement.gains.max()), 4)}
