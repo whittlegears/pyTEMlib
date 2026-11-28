@@ -331,11 +331,32 @@ def get_available_tools() -> str:
 
     return "Available pyTEMlib MCP Tools:\n" + "\n".join(f"- {tool}" for tool in tools)
 
-# Run the server
-if __name__ == "__main__":
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="pyTEMlib analysis MCP server")
+    parser.add_argument("--transport", default="sse", choices=["sse", "streamable-http", "stdio"])
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="127.0.0.1 for local-only, 0.0.0.0 to expose on your network")
+    parser.add_argument("--port", type=int, default=8003)
+    parser.add_argument("--path", default="/mcp")
+    parser.add_argument("--tiled-uri", default=None,
+                        help="Tiled data server for reading acquisitions by data key "
+                             "(default: PYTEMLIB_TILED_URI)")
+    parser.add_argument("--output-dir", default=None,
+                        help="where results computed from data keys are written "
+                             "(default: PYTEMLIB_OUTPUT_DIR, else the current directory)")
+    args = parser.parse_args(argv)
+    if args.tiled_uri:
+        os.environ["PYTEMLIB_TILED_URI"] = args.tiled_uri
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+        os.environ["PYTEMLIB_OUTPUT_DIR"] = os.path.abspath(args.output_dir)
     print("Starting pyTEMlib MCP Server...")
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)
 
-    mcp.run(transport="sse",
-        host="127.0.0.1",  # Use "127.0.0.1" for local-only, "0.0.0.0" to expose on your network
-        port=8003,
-        path="/mcp")
+
+if __name__ == "__main__":
+    main()

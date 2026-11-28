@@ -153,15 +153,17 @@ def register(mcp, loaded_datasets=None, tiled_uri=None, output_dir=None):
     """Register all analysis tools on a FastMCP server instance.
 
     tiled_uri: Tiled server for data keys (PYTEMLIB_TILED_URI when None)
-    output_dir: where results computed from data keys are written (current directory when None)
+    output_dir: where results computed from data keys are written; PYTEMLIB_OUTPUT_DIR, else the
+        current directory, when None
     """
-    output_dir = os.path.abspath(output_dir or os.getcwd())
-
     def load(source, dataset_key=None):
         return load_array(source, dataset_key, loaded_datasets, tiled_uri)
 
+    def results_dir():
+        return os.path.abspath(output_dir or os.environ.get('PYTEMLIB_OUTPUT_DIR') or os.getcwd())
+
     def output_path(source, suffix, output_filename):
-        return _output_path(source, suffix, output_filename, output_dir)
+        return _output_path(source, suffix, output_filename, results_dir())
 
     @mcp.tool()
     def compute_image_metrics(source: str, dataset_key: str = None, metrics: list = None) -> str:
@@ -259,7 +261,7 @@ def register(mcp, loaded_datasets=None, tiled_uri=None, output_dir=None):
         """
         preview = None if preview is None else load(preview)[0]
         mask = sparse_reconstruction.make_sampling_mask((rows, columns), fraction, method, seed, preview)
-        path = output_filename or os.path.join(output_dir, f'sampling_mask_{rows}x{columns}_{method}.npy')
+        path = output_filename or os.path.join(results_dir(), f'sampling_mask_{rows}x{columns}_{method}.npy')
         np.save(path, mask)
         return _json({'mask_file': path, 'measured_positions': int(mask.sum()), 'fraction': float(mask.mean())})
 
