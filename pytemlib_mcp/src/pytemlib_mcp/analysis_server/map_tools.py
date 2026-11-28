@@ -809,17 +809,19 @@ class MapTools:
             return ToolResult(content=[json.dumps(info), MCPImage(data=to_png(region, PREVIEW_MAX_SIDE), format="png")], structured_content=info)
 
         @mcp.tool()
-        def read_map_block(map: str, level: int, block: list[int]) -> dict[str, Any]:
+        def read_map_block(map: str, level: int, block: list[int]) -> ToolResult:
             """Pixels of one block of a stitched map's pyramid level, for a client that draws the map (Tiled or local file).
 
             Blocks are the level's chunk grid: block [i, j] is chunk i along rows and chunk j along columns of the
             ``chunks`` in that level's descriptor (map_info or list_maps ``pyramid``), the block Tiled's read_block((i, j))
             gives. Never more than one chunk.
 
-            Returns {"map", "level", "block", "shape", "dtype", "data"}: data is the block's bytes in C order, base64,
-            in the byte order ``dtype`` names (numpy's form, e.g. "<u2"). An out-of-range level gives the error code
+            Returns {"map", "level", "block", "shape", "dtype", "data"} as structured content: data is the block's bytes
+            in C order, base64, in the byte order ``dtype`` names (numpy's form, e.g. "<u2"). The text content has every
+            field but data, so a model's context never fills with pixels. An out-of-range level gives the error code
             bad_level, an out-of-range block bad_block."""
-            return tools.read_block(map, level, block)
+            reply = tools.read_block(map, level, block)
+            return ToolResult(content=json.dumps({k: v for k, v in reply.items() if k != "data"}), structured_content=reply)
 
     def _register_poi_tools(self, mcp: FastMCP) -> None:
         """Add the tools that list and add points of interest."""

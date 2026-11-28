@@ -397,9 +397,15 @@ Its reply is `$defs/map_block`:
 | `dtype` | The level descriptor's `dtype`, numpy's string with byte order (for example `<u2`). |
 | `data` | The block's bytes, in C (row-major) order and the byte order `dtype` names, base64-encoded. |
 
+The whole reply is the tool's structured content (`structuredContent`). Its text content is the same JSON without
+`data`: a 512 x 512 block of `<u2` is about 700 000 base64 characters, more than a client that hands tool text to a
+model will keep (Angstrom cuts a tool's text at 100 000 characters and saves the rest as a file). A client reads the
+pixels from the structured content.
+
 A level outside `0` to `levels - 1` gives the error code `bad_level`. A block that is not two integers inside the
 level's chunk grid gives `bad_block`. Both errors name the valid range. An unknown map is refused the same way
 `map_info` refuses it.
 
-Tests: `test_analysis_map_views.py` reads blocks of a local map with 32-pixel chunks and compares them with h5py;
+Tests: `test_analysis_map_views.py` reads blocks of a local map with 32-pixel chunks and compares them with h5py,
+and checks that the text content has no `data`;
 `test_analysis_map_live_tiled.py` compares the first and last block of each level with Tiled's own `read_block`.

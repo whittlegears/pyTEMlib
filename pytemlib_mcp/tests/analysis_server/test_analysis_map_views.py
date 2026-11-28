@@ -1,6 +1,7 @@
 """What a client needs to draw a map, through an in-memory MCP client on local HDF5 maps: the map listing with its
 pyramid and transform, the kinds of point with labels, the point query with per-cell counts, and image_info."""
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -171,3 +172,11 @@ def test_read_map_block_refuses_a_level_or_block_off_the_pyramid(small_blocks):
     assert call(c, "read_map_block", map=key, level=-1, block=[0, 0])["error"]["code"] == "bad_level"
     for block in ([len(rows), 0], [0, len(cols)], [-1, 0], [0], [0, 0, 0]):
         assert call(c, "read_map_block", map=key, level=0, block=block)["error"]["code"] == "bad_block", block
+
+
+def test_read_map_block_keeps_its_pixels_out_of_the_text_a_model_reads(small_blocks):
+    c, key = small_blocks
+    result = asyncio.get_event_loop().run_until_complete(c.call_tool("read_map_block", {"map": key, "level": 0, "block": [0, 0]}))
+    text = json.loads(result.content[0].text)
+    assert "data" not in text and text == {k: v for k, v in result.structured_content.items() if k != "data"}
+    assert len(base64.b64decode(result.structured_content["data"])) == np.prod(text["shape"]) * np.dtype(text["dtype"]).itemsize
