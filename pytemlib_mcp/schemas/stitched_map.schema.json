@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stitched_map.schema.json",
+  "title": "Stitched map record",
+  "description": "The metadata of one stitched map version as asyncroscopy's map store writes it today (feature/agentic-mapping at bdc9552), with the point store and level nodes it writes beside it. Every field is traced to code in pytemlib_mcp/docs/map_contract.md.",
+  "type": "object",
+  "allOf": [{ "$ref": "#/$defs/stitch_quality_fields" }],
+  "required": [
+    "kind", "run", "axes", "id", "parents", "version",
+    "levels", "downsample", "pixel_size_m", "origin_xy_m", "canvas_shape", "level_shapes",
+    "tiles", "stitched_at", "refined", "stage_sigma_m", "inputs_sha256", "pytemlib_version",
+    "matches_used", "matches_found"
+  ],
+  "oneOf": [
+    { "required": ["drift"], "not": { "required": ["drift_unmeasured"] } },
+    { "required": ["drift_unmeasured"], "not": { "required": ["drift"] } }
+  ],
+  "properties": {
+    "kind": { "const": "stitched_map" },
+    "run": { "type": "string" },
+    "axes": { "const": "rows=+y, columns=+x; stage coordinates in metres" },
+    "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "parents": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 1 },
+    "version": { "type": "string" },
+    "sample_id": { "type": "string", "minLength": 1 },
+    "sample_load_id": { "type": "string", "minLength": 1 },
+    "levels": { "type": "integer", "minimum": 1 },
+    "downsample": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1 },
+    "pixel_size_m": { "type": "number", "exclusiveMinimum": 0 },
+    "origin_xy_m": { "$ref": "#/$defs/pair" },
+    "canvas_shape": { "$ref": "#/$defs/shape" },
+    "level_shapes": { "type": "array", "items": { "$ref": "#/$defs/shape" }, "minItems": 1 },
+    "tiles": { "type": "integer", "minimum": 1 },
+    "stitched_at": { "type": "number" },
+    "refined": { "type": "boolean" },
+    "stage_sigma_m": { "type": "number" },
+    "inputs_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "pytemlib_version": { "type": "string" },
+    "tile_positions_px": { "type": "array", "items": { "$ref": "#/$defs/pair" } },
+    "tile_gains": { "type": ["array", "null"], "items": { "type": "number" } },
+    "tile_offsets": { "type": ["array", "null"], "items": { "type": "number" } },
+    "scan_linear_applied": { "$ref": "#/$defs/matrix2" },
+    "drift_unmeasured": { "type": "string" }
+  },
+  "unevaluatedProperties": false,
+  "$defs": {
+    "pair": {
+      "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2
+    },
+    "shape": {
+      "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 2, "maxItems": 2
+    },
+    "matrix2": {
+      "type": "array", "items": { "$ref": "#/$defs/pair" }, "minItems": 2, "maxItems": 2
+    },
+    "stitch_quality_fields": {
+      "description": "What pyTEMlib.image_tools.image_mosaic.stitch_quality returns; a stored map has these at its top level.",
+      "type": "object",
+      "required": ["matches_used", "matches_found"],
+      "properties": {
+        "matches_used": { "type": "integer", "minimum": 0 },
+        "matches_found": { "type": "integer", "minimum": 0 },
+        "median_residual_px": { "type": "number" },
+        "p95_residual_px": { "type": "number" },
+        "fallback_tiles": { "type": "integer", "minimum": 0 },
+        "unplaced_tiles": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "scan_linear": {
+          "type": "object",
+          "required": ["applied", "matrix", "stderr"],
+          "additionalProperties": false,
+          "properties": {
+            "applied": { "type": "boolean" },
+            "matrix": { "$ref": "#/$defs/matrix2" },
+            "stderr": { "oneOf": [{ "$ref": "#/$defs/matrix2" }, { "type": "null" }] }
+          }
+        },
+        "tile_gain": {
+          "type": "object",
+          "required": ["min", "max"],
+          "additionalProperties": false,
+          "properties": { "min": { "type": "number" }, "max": { "type": "number" } }
+        },
+        "solver": {
+          "type": "object",
+          "required": ["method", "converged"],
+          "additionalProperties": false,
+          "properties": {
+            "method": { "enum": ["direct", "lsqr"] },
+            "converged": { "type": "boolean" },
+            "iterations": { "type": "integer", "minimum": 0 },
+            "istop": { "type": "array", "items": { "type": "integer" } }
+          }
+        },
+        "drift": {
+          "type": "object",
+          "required": ["times_s", "xy_m", "total_nm", "mean_rate_nm_per_s"],
+          "additionalProperties": false,
+          "properties": {
+            "times_s": { "type": "array", "items": { "type": "number" }, "minItems": 2 },
+            "xy_m": { "type": "array", "items": { "$ref": "#/$defs/pair" }, "minItems": 2 },
+            "total_nm": { "type": "number" },
+            "mean_rate_nm_per_s": { "type": "number" }
+          }
+        }
+      }
+    },
+    "stitch_quality": {
+      "description": "stitch_quality's output on its own: only its fields.",
+      "allOf": [{ "$ref": "#/$defs/stitch_quality_fields" }],
+      "unevaluatedProperties": false
+    },
+    "level_node": {
+      "description": "Metadata of a level_<k> array node in Tiled. A local map file's level_<k> datasets carry no attributes.",
+      "type": "object",
+      "required": ["downsample"],
+      "additionalProperties": false,
+      "properties": { "downsample": { "type": "integer", "minimum": 1 } }
+    },
+    "poi": {
+      "type": "object",
+      "required": ["id", "x_m", "y_m", "kind", "source", "score", "scorer_version", "reason", "links"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "x_m": { "type": "number" },
+        "y_m": { "type": "number" },
+        "kind": { "type": "string" },
+        "source": { "type": "string" },
+        "score": { "type": ["number", "null"] },
+        "scorer_version": { "type": ["string", "null"] },
+        "reason": { "type": "string" },
+        "links": { "type": "array", "items": { "type": "string" } },
+        "window_m": { "type": "number" },
+        "tag": { "type": "string" }
+      }
+    },
+    "poi_grid": {
+      "type": "object",
+      "required": ["x0", "y0", "cell_m", "n"],
+      "additionalProperties": false,
+      "properties": {
+        "x0": { "type": "number" },
+        "y0": { "type": "number" },
+        "cell_m": { "type": "number", "exclusiveMinimum": 0 },
+        "n": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "poi_store": {
+      "description": "Metadata of a run's point store (<run>_points in Tiled, the JSON 'metadata' attribute of <run>_points.h5 locally).",
+      "type": "object",
+      "required": ["kind", "run", "grid", "poi_layer", "layers", "ready"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "poi_store" },
+        "run": { "type": "string" },
+        "grid": { "$ref": "#/$defs/poi_grid" },
+        "poi_layer": { "type": "string" },
+        "layers": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["layer", "replaced_at"], "additionalProperties": false,
+            "properties": { "layer": { "type": "string" }, "replaced_at": { "type": "number" } }
+          }
+        },
+        "ready": { "type": "boolean" },
+        "migrated_from": { "type": "string" },
+        "highlights": { "type": "string" },
+        "replaced_highlights": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["group", "replaced_at"], "additionalProperties": false,
+            "properties": { "group": { "type": "string" }, "replaced_at": { "type": "number" } }
+          }
+        }
+      }
+    },
+    "poi_layer_node": {
+      "description": "Tiled metadata of a point store's layer container.",
+      "type": "object",
+      "required": ["kind", "grid"],
+      "additionalProperties": false,
+      "properties": { "kind": { "const": "poi_layer" }, "grid": { "$ref": "#/$defs/poi_grid" } }
+    },
+    "poi_group_node": {
+      "description": "Tiled metadata of a highlights or c_<i>_<j> group; a local group has the same 'count' as an attribute.",
+      "type": "object",
+      "required": ["count"],
+      "additionalProperties": false,
+      "properties": { "count": { "type": "integer", "minimum": 0 } }
+    },
+    "poi_batch_node": {
+      "description": "Tiled metadata of one batch b_<ns>_<hex>; a local batch is a UTF-8 string dataset holding the JSON array itself.",
+      "type": "object",
+      "required": ["pois"],
+      "additionalProperties": false,
+      "properties": { "pois": { "type": "array", "items": { "$ref": "#/$defs/poi" } } }
+    }
+  }
+}
