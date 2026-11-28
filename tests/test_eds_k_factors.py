@@ -5,6 +5,7 @@ A test whose file is not there skips and names the file.
 
 import csv
 import glob
+import json
 import os
 
 import pytest
@@ -73,16 +74,15 @@ def test_bruker_esl_k_factors_name_the_primary_energy():
     assert metadata['name'] == f"k_factors_Bruker_{metadata['acceleration_voltage']}keV.json"
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError,
-                   reason="write_k_factors passes encoding='utf-8' to json.dump, which does not take it")
 def test_a_converted_csv_is_written_to_the_config_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(eds_xsections, 'config_path', str(tmp_path))
     eds_xsections.convert_k_factor_file(shipped(THERMO_CSV), new_name='converted.json')
     assert (tmp_path / 'converted.json').is_file()
+    table, metadata = eds_xsections.read_k_factors('converted.json')
+    expected, expected_metadata = eds_xsections.read_csv_k_factors(shipped(THERMO_CSV), reduced=True)
+    assert table == json.loads(json.dumps(expected)) and metadata == json.loads(json.dumps(expected_metadata))
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError,
-                   reason='read_k_factors unpacks the JSON object into two names, which takes its first two keys')
 def test_the_shipped_thermo_json_reads_as_the_csv_table():
     table, _ = eds_xsections.read_k_factors(shipped(THERMO_JSON))
     expected, _ = eds_xsections.read_csv_k_factors(shipped(THERMO_CSV), reduced=True)
