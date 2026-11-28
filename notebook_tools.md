@@ -5,6 +5,13 @@ notebook in SPM_agent_simple) is now available as instrument-independent pyTEMli
 functions. Each one also has an MCP tool in `pyTEMlib/mcp_analysis_tools.py`, which
 `pyTEMlib/mcp_server.py` registers automatically.
 
+Every tool takes its data as a *source*: a file path, or a data key returned by an
+instrument acquisition tool. Keys are read from the Tiled data server over HTTP,
+configured with the `PYTEMLIB_TILED_URI` environment variable, so the analysis server
+never talks to Tango. For a multi-detector acquisition, pass `dataset_key` (for example
+`HAADF` or `image/HAADF`). Diffraction data that carries `pixel_size_mrad` metadata
+needs no separate calibration argument.
+
 The notebook versions were tied to one instrument, one detector and one sample.
 The library versions take any 2D image or N-D array, read physical calibration from
 parameters instead of constants, and leave instrument control to the caller.

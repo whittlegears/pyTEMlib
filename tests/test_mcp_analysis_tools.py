@@ -45,18 +45,18 @@ class TestAnalysisMcpTools(unittest.TestCase):
         rows, columns = np.indices((120, 120))
         np.save(self.path('disks.npy'), (((rows - 40) ** 2 + (columns - 40) ** 2) < 100)
                 + 2.0 * (((rows - 85) ** 2 + (columns - 80) ** 2) < 225))
-        result = self.call('segment_image', {'filename': self.path('disks.npy'), 'pixel_size': 0.5})
+        result = self.call('segment_image', {'source': self.path('disks.npy'), 'pixel_size': 0.5})
         self.assertEqual(result['n_regions'], 2)
         self.assertEqual(np.load(result['labels_file']).max(), 2)
-        metrics = self.call('compute_image_metrics', {'filename': self.path('disks.npy'), 'metrics': ['contrast']})
+        metrics = self.call('compute_image_metrics', {'source': self.path('disks.npy'), 'metrics': ['contrast']})
         self.assertGreater(metrics['metrics']['contrast'], 0)
 
     def test_shift_and_stack(self):
         reference = ndimage.gaussian_filter(np.random.default_rng(0).random((64, 64)), 2)
         np.save(self.path('reference.npy'), reference)
         np.save(self.path('moving.npy'), ndimage.shift(reference, (2.5, -1.0), mode='nearest'))
-        result = self.call('measure_image_shift', {'reference_filename': self.path('reference.npy'),
-                                                   'moving_filename': self.path('moving.npy'),
+        result = self.call('measure_image_shift', {'reference': self.path('reference.npy'),
+                                                   'moving': self.path('moving.npy'),
                                                    'pixel_size': 0.1})
         np.testing.assert_allclose(result['shift_px'], (-2.5, 1.0), atol=0.25)
         np.testing.assert_allclose(result['shift_physical'], (-0.25, 0.1), atol=0.025)
@@ -67,7 +67,7 @@ class TestAnalysisMcpTools(unittest.TestCase):
         mask = self.call('plan_sampling_mask', {'rows': 48, 'columns': 48, 'fraction': 0.25,
                                                 'output_filename': self.path('mask.npy')})
         np.save(self.path('image.npy'), image * np.load(mask['mask_file']))
-        result = self.call('reconstruct_sparse_data', {'filename': self.path('image.npy'),
+        result = self.call('reconstruct_sparse_data', {'source': self.path('image.npy'),
                                                        'mask_filename': mask['mask_file']})
         self.assertLess(np.abs(np.load(result['reconstruction_file']) - image).mean(), 0.1)
         nxt = self.call('suggest_next_measurements', {'rows': 8, 'columns': 8, 'count': 2,
@@ -81,7 +81,7 @@ class TestAnalysisMcpTools(unittest.TestCase):
         wavelength = utilities.get_wavelength(300e3, 'A')
         ring_radius = 2 * np.arcsin(wavelength / (2 * 4.078 / np.sqrt(3))) * 1e3 / 0.2
         np.save(self.path('ring.npy'), 50.0 * (radius <= 5) + np.exp(-0.5 * ((radius - ring_radius) / 0.8) ** 2))
-        result = self.call('analyze_diffraction_rings', {'filename': self.path('ring.npy'), 'pixel_size_mrad': 0.2,
+        result = self.call('analyze_diffraction_rings', {'source': self.path('ring.npy'), 'pixel_size_mrad': 0.2,
                                                          'acceleration_voltage': 300e3, 'deconvolve': False,
                                                          'hkl': [[1, 1, 1]]})
         self.assertAlmostEqual(result['rings'][0]['lattice_parameter_A'], 4.078, delta=0.04)
@@ -93,10 +93,10 @@ class TestAnalysisMcpTools(unittest.TestCase):
         cube = sample[..., None, None] * disk
         np.save(self.path('cube_a.npy'), cube)
         np.save(self.path('cube_b.npy'), ndimage.shift(sample, (1, 0), mode='wrap')[..., None, None] * disk)
-        image = self.call('four_d_stem_virtual_image', {'filename': self.path('cube_a.npy'),
+        image = self.call('four_d_stem_virtual_image', {'source': self.path('cube_a.npy'),
                                                         'inner_radius': 0, 'outer_radius': 4})
         np.testing.assert_allclose(np.load(image['image_file']), sample * disk.sum())
-        maped = self.call('maped_average_cubes', {'filenames': [self.path('cube_a.npy'), self.path('cube_b.npy')],
+        maped = self.call('maped_average_cubes', {'sources': [self.path('cube_a.npy'), self.path('cube_b.npy')],
                                                   'dark_field_inner': 0.0, 'dark_field_outer': 0.3})
         np.testing.assert_allclose(maped['real_shifts_px'][1], (-1, 0), atol=0.25)
 
@@ -112,3 +112,89 @@ class TestAnalysisMcpTools(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def _tiled_available():
+    import shutil
+    import importlib.util
+    return shutil.which('tiled') is not None and importlib.util.find_spec('h5py') is not None
+
+
+@unittest.skipUnless(fastmcp_available and _tiled_available(), 'fastmcp, tiled server or h5py not installed')
+class TestDataKeysFromTiled(unittest.TestCase):
+    """Tools read instrument data by key from a real Tiled server, laid out as acquisitions write it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import subprocess
+        import time
+        import h5py
+        cls.directory = tempfile.mkdtemp()
+        cls.output = tempfile.mkdtemp()
+        rows, columns = np.indices((96, 96))
+        with h5py.File(os.path.join(cls.directory, 'stem_image_001.h5'), 'w') as handle:
+            handle['image/HAADF'] = (((rows - 48) ** 2 + (columns - 40) ** 2) < 200).astype(float)
+            handle['image/BF'] = 1.0 - handle['image/HAADF'][()]
+        radius = np.hypot(*(np.indices((256, 256)) - 127.5))
+        wavelength = utilities.get_wavelength(200e3, 'A')
+        ring = 2 * np.arcsin(wavelength / (2 * 4.078 / np.sqrt(3))) * 1e3 / 0.25
+        with h5py.File(os.path.join(cls.directory, 'camera_image_001.h5'), 'w') as handle:
+            dataset = handle.create_dataset('image', data=50.0 * (radius <= 5)
+                                            + np.exp(-0.5 * ((radius - ring) / 0.8) ** 2))
+            dataset.attrs['pixel_size_mrad'] = 0.25
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        cls.process = subprocess.Popen(['tiled', 'serve', 'directory', cls.directory, '--public', '--port', str(port)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cls.uri = f'http://127.0.0.1:{port}'
+        from tiled.client import from_uri
+        deadline = time.time() + 60
+        while True:
+            try:
+                if {'stem_image_001', 'camera_image_001'} <= set(from_uri(cls.uri)):
+                    break
+            except Exception:
+                pass
+            if time.time() > deadline:
+                cls.process.kill()
+                raise RuntimeError('Tiled server did not start')
+            time.sleep(0.5)
+        cls.server = FastMCP('test')
+        mcp_analysis_tools.register(cls.server, {}, tiled_uri=cls.uri, output_dir=cls.output)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.process.terminate()
+        cls.process.wait(10)
+
+    def call(self, name, arguments):
+        async def run():
+            async with Client(self.server) as client:
+                return await client.call_tool(name, arguments, raise_on_error=False)
+        return asyncio.run(run())
+
+    def test_multi_detector_key_needs_a_detector(self):
+        result = self.call('compute_image_metrics', {'source': 'stem_image_001'})
+        self.assertTrue(result.is_error)
+        self.assertIn('image/HAADF', result.content[0].text)
+        full_path = json.loads(self.call('compute_image_metrics', {'source': 'stem_image_001',
+                                                                   'dataset_key': 'image/BF'}).content[0].text)
+        self.assertIn('contrast', full_path['metrics'])
+
+    def test_detector_path_inside_a_key(self):
+        result = json.loads(self.call('segment_image', {'source': 'stem_image_001',
+                                                        'dataset_key': 'HAADF'}).content[0].text)
+        self.assertEqual(result['n_regions'], 1)
+        self.assertTrue(result['labels_file'].startswith(self.output))
+
+    def test_calibration_comes_from_metadata(self):
+        result = json.loads(self.call('analyze_diffraction_rings', {'source': 'camera_image_001', 'deconvolve': False,
+                                                                    'hkl': [[1, 1, 1]]}).content[0].text)
+        self.assertAlmostEqual(result['rings'][0]['lattice_parameter_A'], 4.078, delta=0.04)
+
+    def test_unknown_key_is_reported(self):
+        result = self.call('compute_image_metrics', {'source': 'no_such_acquisition'})
+        self.assertTrue(result.is_error)
+        self.assertIn('no_such_acquisition', result.content[0].text)
