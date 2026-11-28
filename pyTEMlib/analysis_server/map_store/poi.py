@@ -16,8 +16,13 @@ from .runs import _batch_points, _decode
 from .pyramid import _replace_metadata
 
 POI_CELLS = 64  # cells along each side of the POI layer's grid over the map
-CELL_KINDS = {"eds_point"}  # kinds kept in spatial cells, and every other kind is a highlight
+CELL_KINDS = {"eds_point": "EDS point spectrum"}  # kinds kept in spatial cells, with their labels; every other kind is a highlight
 HIGHLIGHTS = "highlights"
+
+
+def poi_kind_labels() -> list[dict]:
+    """The kinds of point kept in spatial cells, each {"kind", "label"}: what a stitched map's metadata reports as poi_kinds."""
+    return [{"kind": kind, "label": label} for kind, label in sorted(CELL_KINDS.items())]
 
 
 class PoiStore:
@@ -192,7 +197,7 @@ class PoiStore:
         key, meta = self._points_at(map_key)
         found = {str(p.get("kind")) for p in (_decode(meta.get("pois", [])) or []) + self._read_group(key, meta, self._highlights_name(meta))}
         if any(n > 0 for n in self.poi_counts(map_key)["cells"].values()):
-            found |= CELL_KINDS
+            found |= set(CELL_KINDS)
         return sorted(found)
 
     def poi_counts(self, map_key: str) -> dict:

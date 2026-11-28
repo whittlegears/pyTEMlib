@@ -13,7 +13,7 @@ import h5py
 import numpy as np
 
 from .runs import LazyTiles, LocalPathRefused, RunData, RunInfo, TileSource, _Locks, _decode, _file_lock, _layout1_info, _layout2_info
-from .poi import PoiStore
+from .poi import PoiStore, poi_kind_labels
 from .pyramid import _LocalMapWriter, _TiledMapWriter
 
 AXES = "rows=+y, columns=+x; stage coordinates in metres"
@@ -207,7 +207,8 @@ class MapStore(PoiStore):
         it was stitched before point stores existed. On Tiled the new version is listed only once all of this is
         done, so a failure here removes a version nothing can have named.
         """
-        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], "version": writer.name, **self.sample_of(run), **metadata}
+        metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], "version": writer.name,
+                    "poi_kinds": poi_kind_labels(), **self.sample_of(run), **metadata}
         try:
             staged = writer.finish(metadata)
         except Exception as exc:

@@ -195,3 +195,8 @@ def test_a_local_store_left_without_metadata_is_rebuilt(tmp_path):
     assert store.list_pois(first) == []
     store.add_pois(first, [{"id": "n1", "x_m": 0.0, "y_m": 0.0, "kind": "note", "links": []}])
     assert [p["id"] for p in store.list_pois(first)] == ["n1"]
+
+
+def test_a_stitched_map_reports_the_kinds_of_point_kept_in_cells_with_their_labels(tmp_path):
+    tools, _path, key = stitched(tmp_path)
+    assert tools.store.map_metadata(key)["poi_kinds"] == [{"kind": "eds_point", "label": "EDS point spectrum"}]
