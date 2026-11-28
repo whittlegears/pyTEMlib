@@ -376,3 +376,30 @@ New tool. It says which array of a dataset is its image, and where that image si
 An unknown key gives the `unknown_dataset` error with the newest keys. A container with no array gives the error code
 `no_image`.
 
+
+### 7.5 `read_map_block(map, level, block)`
+
+New read-only tool. It gives the pixels of one block of one pyramid level, for a map in Tiled or in a local HDF5
+file, so a client draws every map the same way. A local map is not served by Tiled, so this tool is the only way a
+client reads its pixels. For a Tiled map a client can still read the block from Tiled; the two give the same array.
+
+- `block` is `[i, j]`: chunk `i` along rows and chunk `j` along columns of the level descriptor's `chunks` (7.1).
+  These are the blocks Tiled's `read_block((i, j))` gives for the same level, and a local level's chunks are expanded
+  to the same form. A reply is never larger than one chunk.
+- The block covers rows `sum(chunks[0][:i])` to `sum(chunks[0][:i + 1])` and the same for columns.
+
+Its reply is `$defs/map_block`:
+
+| Field | Meaning |
+| :-- | :-- |
+| `map`, `level`, `block` | As given. |
+| `shape` | `[rows, cols]`: `[chunks[0][i], chunks[1][j]]`. |
+| `dtype` | The level descriptor's `dtype`, numpy's string with byte order (for example `<u2`). |
+| `data` | The block's bytes, in C (row-major) order and the byte order `dtype` names, base64-encoded. |
+
+A level outside `0` to `levels - 1` gives the error code `bad_level`. A block that is not two integers inside the
+level's chunk grid gives `bad_block`. Both errors name the valid range. An unknown map is refused the same way
+`map_info` refuses it.
+
+Tests: `test_analysis_map_views.py` reads blocks of a local map with 32-pixel chunks and compares them with h5py;
+`test_analysis_map_live_tiled.py` compares the first and last block of each level with Tiled's own `read_block`.

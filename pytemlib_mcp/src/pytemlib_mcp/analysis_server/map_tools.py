@@ -25,6 +25,7 @@ run's points of interest are kept once for all its versions (see ``map_store``).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -526,6 +527,25 @@ class MapTools:
                 info["versions"] = {"count": len(versions), "newest": versions[0]["map"], "this_is_newest": versions[0]["map"] == map_key}
         return info
 
+    def read_block(self, map_key: str, level: Any, block: Any) -> dict[str, Any]:
+        """One block of a pyramid level, on the chunk grid of its level descriptor (``map_view``), as base64 bytes."""
+        pyramid = self.store.map_view(map_key)["pyramid"]
+        if isinstance(level, bool) or not isinstance(level, int) or not 0 <= level < len(pyramid):
+            return {"error": {"code": "bad_level", "message": f"level must be an integer from 0 to {len(pyramid) - 1}, not {level!r}"}}
+        chunks = pyramid[level]["chunks"]
+        grid = [len(axis) for axis in chunks]
+        if (not isinstance(block, (list, tuple)) or len(block) != 2
+                or any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < n for v, n in zip(block, grid))):
+            return {"error": {"code": "bad_block", "message": f"block must be [i, j] with 0 <= i < {grid[0]} and 0 <= j < {grid[1]} at level {level}, not {block!r}"}}
+        (i, j), (row_sides, col_sides) = block, chunks
+        r0, c0 = sum(row_sides[:i]), sum(col_sides[:j])
+        dtype = np.dtype(pyramid[level]["dtype"])
+        data = np.ascontiguousarray(self.store.read_level(map_key, level, slice(r0, r0 + row_sides[i]), slice(c0, c0 + col_sides[j])), dtype=dtype)
+        if data.shape != (row_sides[i], col_sides[j]):
+            raise RuntimeError(f"level {level} block {[i, j]} of {map_key} read as {data.shape}, not its chunk {(row_sides[i], col_sides[j])}")
+        return {"map": map_key, "level": level, "block": [i, j], "shape": list(data.shape), "dtype": dtype.str,
+                "data": base64.b64encode(data.tobytes(order="C")).decode("ascii")}
+
     def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200,
                   counts_above: int | None = None) -> dict[str, Any]:
         """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
@@ -787,6 +807,19 @@ class MapTools:
                 return ToolResult(content=[json.dumps({**info, "note": "box is outside the map"})], structured_content=info)
             info.update({"mean": float(region.mean()), "max": float(region.max())})
             return ToolResult(content=[json.dumps(info), MCPImage(data=to_png(region, PREVIEW_MAX_SIDE), format="png")], structured_content=info)
+
+        @mcp.tool()
+        def read_map_block(map: str, level: int, block: list[int]) -> dict[str, Any]:
+            """Pixels of one block of a stitched map's pyramid level, for a client that draws the map (Tiled or local file).
+
+            Blocks are the level's chunk grid: block [i, j] is chunk i along rows and chunk j along columns of the
+            ``chunks`` in that level's descriptor (map_info or list_maps ``pyramid``), the block Tiled's read_block((i, j))
+            gives. Never more than one chunk.
+
+            Returns {"map", "level", "block", "shape", "dtype", "data"}: data is the block's bytes in C order, base64,
+            in the byte order ``dtype`` names (numpy's form, e.g. "<u2"). An out-of-range level gives the error code
+            bad_level, an out-of-range block bad_block."""
+            return tools.read_block(map, level, block)
 
     def _register_poi_tools(self, mcp: FastMCP) -> None:
         """Add the tools that list and add points of interest."""

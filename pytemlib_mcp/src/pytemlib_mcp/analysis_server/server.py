@@ -88,7 +88,7 @@ READ_ONLY = frozenset({
     "get_pytemlib_status", "calculate_electron_wavelength", "list_supported_file_formats", "open_tem_file",
     "list_loaded_datasets", "get_dataset_info", "calculate_probe_size",
     "analyze_diffraction_pattern", "create_visualization_script", "get_available_tools",
-    "analysis_job_status", "analysis_job_results", "map_info", "list_maps", "get_region", "list_pois",
+    "analysis_job_status", "analysis_job_results", "map_info", "list_maps", "get_region", "read_map_block", "list_pois",
     "list_scorers", "list_tiles", "to_stage", "find_features", "to_pixel", "image_info", "list_placements",
     "list_annotations", "annotation_history", "match_tiles",
 })

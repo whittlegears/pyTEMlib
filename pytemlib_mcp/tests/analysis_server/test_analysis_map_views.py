@@ -1,13 +1,16 @@
 """What a client needs to draw a map, through an in-memory MCP client on local HDF5 maps: the map listing with its
 pyramid and transform, the kinds of point with labels, the point query with per-cell counts, and image_info."""
 
+import base64
 import json
 from pathlib import Path
 
 import h5py
 import jsonschema
+import numpy as np
 import pytest
 
+from pytemlib_mcp.analysis_server import map_tools
 from pytemlib_mcp.analysis_server.map_store import pixel_to_stage
 
 from .test_analysis_map_store_reads import write_layout2
@@ -127,3 +130,44 @@ def test_image_info_on_a_map_names_its_level_0_and_its_frame(served):
     assert info["frame"]["centre_xy_m"] == pytest.approx(list(pixel_to_stage(meta, (rows - 1) / 2, (cols - 1) / 2)))
     missing = call(c, "image_info", dataset="no_such_image")
     assert missing["error"]["code"] in ("unknown_dataset", "no_image")
+
+
+@pytest.fixture
+def small_blocks(tmp_path, monkeypatch):
+    monkeypatch.setattr(map_tools, "BLOCK", 32)
+    c, tools, loop = open_client(local_roots=[tmp_path])
+    path, _tiles = write_layout2(tmp_path / "run.h5", grid=3)
+    started = call(c, "assemble_map", run=path)
+    assert tools.jobs.wait(started["job_id"])["state"] == "done"
+    key = call(c, "analysis_job_results", job_id=started["job_id"])["result_keys"]["map"]
+    yield c, key
+    loop.run_until_complete(c.__aexit__(None, None, None))
+    loop.close()
+
+
+def test_read_map_block_gives_every_block_of_a_local_map_on_its_chunk_grid_as_h5py_reads_it(small_blocks):
+    c, key = small_blocks
+    pyramid = call(c, "map_info", map=key)["pyramid"]
+    assert len(pyramid[0]["chunks"][0]) > 1 and len(pyramid[0]["chunks"][1]) > 1
+    with h5py.File(key, "r") as h5:
+        for level in pyramid:
+            data = h5[f"level_{level['level']}"]
+            rows, cols = level["chunks"]
+            for i, j in [(0, 0), (len(rows) - 1, len(cols) - 1), (len(rows) // 2, 0)]:
+                reply = call(c, "read_map_block", map=key, level=level["level"], block=[i, j])
+                validator("map_block").validate(reply)
+                assert reply["map"] == key and reply["level"] == level["level"] and reply["block"] == [i, j]
+                assert reply["shape"] == [rows[i], cols[j]] and reply["dtype"] == level["dtype"]
+                block = np.frombuffer(base64.b64decode(reply["data"]), dtype=np.dtype(reply["dtype"])).reshape(reply["shape"])
+                r0, c0 = sum(rows[:i]), sum(cols[:j])
+                np.testing.assert_array_equal(block, data[r0:r0 + rows[i], c0:c0 + cols[j]])
+
+
+def test_read_map_block_refuses_a_level_or_block_off_the_pyramid(small_blocks):
+    c, key = small_blocks
+    pyramid = call(c, "map_info", map=key)["pyramid"]
+    rows, cols = pyramid[0]["chunks"]
+    assert call(c, "read_map_block", map=key, level=len(pyramid), block=[0, 0])["error"]["code"] == "bad_level"
+    assert call(c, "read_map_block", map=key, level=-1, block=[0, 0])["error"]["code"] == "bad_level"
+    for block in ([len(rows), 0], [0, len(cols)], [-1, 0], [0], [0, 0, 0]):
+        assert call(c, "read_map_block", map=key, level=0, block=block)["error"]["code"] == "bad_block", block

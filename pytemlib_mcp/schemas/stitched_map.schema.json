@@ -297,6 +297,20 @@
         "sample_id": { "type": "string", "minLength": 1 },
         "sample_load_id": { "type": "string", "minLength": 1 }
       }
+    },
+    "map_block": {
+      "description": "read_map_block's reply: one block of a pyramid level on its descriptor's chunk grid. data is the block's bytes in C order, base64, in the byte order dtype names.",
+      "type": "object",
+      "required": ["map", "level", "block", "shape", "dtype", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "map": { "type": "string" },
+        "level": { "type": "integer", "minimum": 0 },
+        "block": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2 },
+        "shape": { "$ref": "#/$defs/shape" },
+        "dtype": { "type": "string", "pattern": "^[<>|=][a-zA-Z][0-9]*$" },
+        "data": { "type": "string", "contentEncoding": "base64" }
+      }
     }
   }
 }

@@ -2,6 +2,7 @@
 a level read through the descriptor the server gives, and points read back, the highlights after a rescore included."""
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 
@@ -101,6 +102,14 @@ def test_a_run_written_to_tiled_is_stitched_listed_read_and_its_points_come_back
         assert list(block.shape) == [level["chunks"][0][0], level["chunks"][1][0]]
         assert np.dtype(level["dtype"]) == block.dtype
         np.testing.assert_array_equal(block, tools.store.read_level(key, level["level"], slice(0, block.shape[0]), slice(0, block.shape[1])))
+        last = [len(level["chunks"][0]) - 1, len(level["chunks"][1]) - 1]
+        for index in ([0, 0], last):
+            reply = call("read_map_block", map=key, level=level["level"], block=index)
+            validator("map_block").validate(reply)
+            served_block = np.frombuffer(base64.b64decode(reply["data"]), dtype=np.dtype(reply["dtype"])).reshape(reply["shape"])
+            np.testing.assert_array_equal(served_block, node.read_block(tuple(index)))
+            assert reply["dtype"] == level["dtype"] and np.dtype(reply["dtype"]) == node.read_block(tuple(index)).dtype
+        assert call("read_map_block", map=key, level=level["level"], block=[last[0] + 1, 0])["error"]["code"] == "bad_block"
         x, y = pixel_to_stage(meta, 1, 2, level["level"])
         assert (level["origin_xy_m"][0] + 2 * level["pixel_size_m"], level["origin_xy_m"][1] + level["pixel_size_m"]) == pytest.approx((x, y), abs=1e-15)
 
