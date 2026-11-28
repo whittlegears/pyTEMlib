@@ -40,6 +40,13 @@ parameters instead of constants, and leave instrument control to the caller.
 - **Sparse reconstruction.** Data no longer have to lie in [0, 1]. Values are
   normalised by the measured range and returned in the original units. Extra axes
   (colour channels, spectra, diffraction patterns) are reconstructed together.
+- **High-frequency power.** The notebooks measured it as a fraction of total power. At
+  low dose most of that power is white shot noise, so a sharper probe lowered the
+  fraction and a worse probe scored as sharper. It is now measured relative to the mean
+  intensity squared, like contrast and edge sharpness, so noise only adds an offset.
+- **Local model fits.** Focus and aberration responses are sharply peaked with flat
+  tails. Fitting one quadratic to every measurement, as the notebooks did, misplaced the
+  peak, so `propose_next_point` now fits only the measurements near the current best.
 - **Hill climbing.** The 1D and 2D quadratic fits are now one fit that works in any
   number of dimensions. The optimiser has no instrument calls: the caller sets the
   parameter, measures, and calls `tell`.

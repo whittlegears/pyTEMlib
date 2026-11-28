@@ -72,7 +72,13 @@ def image_entropy(image, bins=256, percentiles=(1, 99)):
 
 
 def high_frequency_power(image, cutoff=0.20):
-    """Fraction of Fourier power above a spatial-frequency cutoff.
+    """Image variance carried by spatial frequencies above a cutoff, relative to the mean squared.
+
+    This is the squared contrast of the high-frequency part of the image. It is measured
+    relative to the mean intensity, which is fixed by the dose, rather than as a fraction of
+    the total power: in a low-dose image most of the power is white shot noise, and a
+    fraction falls when a sharper probe adds signal, ranking a worse probe as sharper.
+    Measured against the mean, noise only adds a constant offset.
 
     Parameters
     ----------
@@ -83,12 +89,12 @@ def high_frequency_power(image, cutoff=0.20):
     image = np.nan_to_num(_as_float_array(image))
     if image.ndim != 2:
         raise ValueError('high_frequency_power needs a 2D image')
-    centered = image - np.mean(image)
-    power = np.abs(np.fft.rfft2(centered)) ** 2
-    frequency_y = np.fft.fftfreq(centered.shape[0])[:, None]
-    frequency_x = np.fft.rfftfreq(centered.shape[1])[None, :]
+    mean = np.mean(image)
+    power = np.abs(np.fft.fft2(image - mean)) ** 2
+    frequency_y = np.fft.fftfreq(image.shape[0])[:, None]
+    frequency_x = np.fft.fftfreq(image.shape[1])[None, :]
     high = np.hypot(frequency_x, frequency_y) >= cutoff
-    return float(power[high].sum() / (power.sum() + 1e-12))
+    return float(power[high].sum() / image.size ** 2 / (mean ** 2 + 1e-24))
 
 
 def edge_sharpness(image, percentiles=(1, 99)):

@@ -37,6 +37,18 @@ class TestImageMetrics(unittest.TestCase):
         for name in ('contrast', 'high_frequency_power', 'edge_sharpness'):
             self.assertGreater(sharp_metrics[name], blurred_metrics[name], name)
 
+    def test_low_dose_noise_does_not_reverse_the_ranking(self):
+        rows, columns = np.indices((128, 128), dtype=float)
+        lattice = np.cos(2 * np.pi * rows / 5) * np.cos(2 * np.pi * columns / 5) + 1.2
+        rng = np.random.default_rng(3)
+        for sigma_sharp, sigma_blurred in ((0.6, 1.2), (0.8, 2.0)):
+            scores = []
+            for sigma in (sigma_sharp, sigma_blurred):
+                image = ndimage.gaussian_filter(lattice, sigma)
+                counts = rng.poisson(image / image.mean() * 1.3).astype(float)
+                scores.append(image_metrics.high_frequency_power(counts + rng.normal(0, 0.5, counts.shape) + 1))
+            self.assertGreater(scores[0], scores[1])
+
     def test_stack_returns_one_value_per_frame(self):
         stack = np.stack([_lattice_image(), ndimage.gaussian_filter(_lattice_image(), 2)])
         result = image_metrics.image_quality_metrics(stack, metrics=['contrast'])
@@ -281,6 +293,23 @@ class TestOptimization(unittest.TestCase):
             optimizer.tell(setting, score(setting[0]))
         best, _ = optimizer.best()
         self.assertAlmostEqual(best[0], optimum, delta=5e-9)
+
+    def test_optimizer_finds_a_sharp_peak_with_flat_tails(self):
+        optimum = 30e-9
+
+        def score(z):
+            distance_nm = min(abs(z - optimum) * 1e9, 72.0)
+            return 0.05 + np.exp(-(distance_nm / 25.0) ** 2)
+
+        optimizer = optimization_tools.TrustRegionOptimizer(start=120e-9, step=40e-9, max_iterations=8)
+        while (setting := optimizer.ask()) is not None:
+            optimizer.tell(setting, score(setting[0]))
+        self.assertAlmostEqual(optimizer.best()[0][0], optimum, delta=4e-9)
+
+    def test_local_points_keep_enough_for_a_quadratic(self):
+        points = np.array([[0.0], [10.0], [20.0], [100.0], [200.0]])
+        chosen = optimization_tools.local_points(points, [0.1, 0.9, 0.3, 0.0, 0.0], trust_radius=5.0)
+        self.assertEqual(sorted(chosen.tolist()), [0, 1, 2])
 
     def test_optimizer_two_parameters_minimize(self):
         target = np.array([3.0, -2.0])

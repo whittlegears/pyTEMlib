@@ -76,12 +76,34 @@ def _candidates_in_ball(center, radius, dims, rng, count):
     return center + unit * radius
 
 
+def local_points(points, scores, trust_radius, maximize=True, reach=3.0):
+    """Indices of the measurements a local quadratic model should be fitted to.
+
+    Focus-type responses are sharply peaked with flat tails, so one quadratic fitted to
+    every measurement misplaces the peak. Keep the points within ``reach`` trust radii of
+    the best one, but never fewer than a full quadratic in this many dimensions needs.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    points = points[:, None] if points.ndim == 1 else points
+    sign = 1.0 if maximize else -1.0
+    dims = points.shape[1]
+    radius = np.broadcast_to(np.asarray(trust_radius, dtype=np.float64), (dims,))
+    best = points[int(np.argmax(sign * np.asarray(scores, dtype=np.float64)))]
+    distance = np.linalg.norm((points - best) / radius, axis=1)
+    order = np.argsort(distance, kind='stable')
+    needed = (dims + 1) * (dims + 2) // 2
+    near = order[distance[order] <= reach]
+    return near if len(near) >= needed else order[:needed]
+
+
 def propose_next_point(points, scores, trust_radius, bounds=None, maximize=True,
-                       candidate_count=401, min_separation_fraction=1 / 40, seed=0):
+                       candidate_count=401, min_separation_fraction=1 / 40, seed=0, local_reach=3.0):
     """Next setting to measure: the best predicted point within the trust region.
 
     The trust region is a ball (scaled per dimension by ``trust_radius``)
-    around the best measured point. Candidates closer than
+    around the best measured point. The quadratic model is fitted only to the
+    measurements within ``local_reach`` trust radii of the best one (see
+    :func:`local_points`); ``local_reach=None`` fits all of them. Candidates closer than
     ``min_separation_fraction * trust_radius`` to a measured point are skipped.
 
     Parameters
@@ -96,6 +118,7 @@ def propose_next_point(points, scores, trust_radius, bounds=None, maximize=True,
     min_separation_fraction: float
     seed: int
         random seed for the candidate cloud in more than two dimensions
+    local_reach: float or None
 
     Returns
     -------
@@ -117,9 +140,9 @@ def propose_next_point(points, scores, trust_radius, bounds=None, maximize=True,
     candidates = candidates[scaled_distance.min(axis=1) > min_separation_fraction]
     if not len(candidates):
         return None
-    predict = fit_quadratic_response(points, scores)
-    choice = candidates[int(np.argmax(sign * predict(candidates)))]
-    return choice
+    model = slice(None) if local_reach is None else local_points(points, scores, radius, maximize, local_reach)
+    predict = fit_quadratic_response(points[model], scores[model])
+    return candidates[int(np.argmax(sign * predict(candidates)))]
 
 
 class TrustRegionOptimizer:
