@@ -70,6 +70,16 @@ Documentation = "https://pycroscopy.github.io/pyTEMlib/"
 pyTEMlib = "pyTEMlib:main"
 
 [project.optional-dependencies]
+tiled = [
+    "tiled[client]",
+]
+# Bayesian optimisation tools. SAM2 segmentation additionally needs
+#     pip install "git+https://github.com/facebookresearch/sam2.git" huggingface-hub
+ml = [
+    "torch",
+    "gpytorch",
+    "botorch",
+]
 test = [
     "pytest",
     "pytest-runner"

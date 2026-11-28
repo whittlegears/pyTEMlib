@@ -26,6 +26,14 @@ from .dynamic import potential_1dim, potential_2dim, interaction_parameter
 from .dynamic import get_transmission, get_propagator, multi_slice, make_chi
 from .dynamic import objective_lens_function
 
+from . import ring_analysis, four_d_stem
+from .ring_analysis import find_direct_beam, deconvolve_direct_beam, radial_profile
+from .ring_analysis import find_profile_peaks, angle_to_d_spacing, cubic_lattice_parameter
+from .ring_analysis import analyze_ring_pattern
+from .four_d_stem import mean_diffraction_pattern, max_diffraction_pattern, virtual_detector_mask
+from .four_d_stem import virtual_image, center_of_mass_shifts, align_cube_patterns
+from .four_d_stem import align_cube_scan, maped_average, tilt_series_map
+
 
 __all__ = ['read_poscar', 'example', 'zone_mistilt', 'check_sanity', 'get_all_g_vectors',
            'make_pretty_labels', 'get_all_miller_indices', 'get_wavelength',
@@ -40,4 +48,9 @@ __all__ = ['read_poscar', 'example', 'zone_mistilt', 'check_sanity', 'get_all_g_
            'plot_kikuchi', 'plot_reciprocal_unit_cell_2d', 'scattering_profiles',
            'set_center', 'potential_1dim', 'potential_2dim', 'interaction_parameter', 
            'get_transmission', 'get_propagator', 'multi_slice', 'make_chi', 
-           'objective_lens_function', 'draw_kikuchi_map']
+           'objective_lens_function', 'draw_kikuchi_map',
+           'ring_analysis', 'four_d_stem', 'find_direct_beam', 'deconvolve_direct_beam',
+           'radial_profile', 'find_profile_peaks', 'angle_to_d_spacing', 'cubic_lattice_parameter',
+           'analyze_ring_pattern', 'mean_diffraction_pattern', 'max_diffraction_pattern',
+           'virtual_detector_mask', 'virtual_image', 'center_of_mass_shifts',
+           'align_cube_patterns', 'align_cube_scan', 'maped_average', 'tilt_series_map']
