@@ -42,6 +42,7 @@ These are HDF5 file attributes, or Tiled container metadata.
 | `tiles` | int | `map_tools.py:380` | not read by the map store |
 | `created` | float, Unix seconds | `map_tools.py:380`, `record.py:88` | not read by the map store |
 | `source` | `"workflow"` | `map_tools.py:379` | not read by the map store |
+| `spectra_at` | `[x, y]` fractions of the tile image, x from the left, y from the top | `collect_run`, only with `spectrum_keys` (`MapTools._spectra` checks both) | `eds_pois` through `TileSource.attribute`. Without it the spectra are at the tile centre, where the Mapper takes them (asyncroscopy `map_profile.py`, `place_beam([0.5, 0.5])`). |
 | `instrument_id`, `code_version`, `sample_error` | string | `record.py:82-90`. Null values are left out (`record.py:90`). | not read by the map store |
 | `schema_version`, `run_id`, `plan_id`, `grid` (JSON `{"rows","cols"}`), `axes`, `microscope`, `instrument_profile`, `trace_offset`, `run` | various | Mapper only (`mapper.py:288-300`) | not read by the map store |
 
@@ -63,6 +64,12 @@ Layout 1 is for small runs (`__init__.py:13-14`). `collect_map_run` writes it
 | `source_key` | string | `map_tools.py:402`, `map_tools.py:435` | not read by the map store |
 | `acquired` | float seconds | not written by `collect_run` | `runs.py:174`. The run has times only when every tile has one (`runs.py:182`). |
 
+Beside `tiles`, a layout 1 run that `collect_run` gathered with `spectrum_keys` also has:
+
+| Dataset | Shape, type | Written | Read |
+| :-- | :-- | :-- | :-- |
+| `spectrum_keys` | `[n]` string, one per image in `image_keys` order, `""` where no spectrum was taken | `collect_run`: an HDF5 string dataset (local) or a unicode array child of the run container (Tiled) | `eds_pois` through `TileSource.dataset`, as for layout 2. Entry k belongs to the tile whose `index` is k. |
+
 From Tiled, a layout 1 run of at most `V1_EXPORT_MAX_TILES` (20 000) tiles is read as one HDF5
 export. A larger run is read tile by tile (`runs.py:24`, `runs.py:255-262`).
 
@@ -81,7 +88,7 @@ Layout 2 is for maps of any size (`__init__.py:7-12`). The Mapper's `RunFile` wr
 | `acquired_s` | `[n]` float64, the instrument `clock_s` | `run_file.py:126`, `run_file.py:139`; meaning `run_file.py:10-11` | `runs.py:195`, `runs.py:201` |
 | `row_col` | `[n, 2]` int32, -1 until written | `run_file.py:127`, `run_file.py:140` | `runs.py:196`, `runs.py:202` |
 | `source_keys` | `[n]` string | `run_file.py:128`, `run_file.py:141` | not read by the map store |
-| `spectra`, `spectrum_keys` | `[n, channels]`, `[n]` string | `run_file.py:142-151` | `spectrum_keys` is read by `eds_pois` (`map_tools.py:108`) |
+| `spectra`, `spectrum_keys` | `[n, channels]`, `[n]` string | `run_file.py:142-151` | `spectrum_keys` is read by `eds_pois` (`map_tools.py:108`), in either layout |
 | `spectrum_image`, `spectrum_image_keys` | `[n, points, points, channels]`, `[n]` string | `run_file.py:160-178` | not read by the map store |
 | further per-tile arrays (for example `drift_correction_m`) | `[n, ...]` float64, NaN-filled | `run_file.py:152-156` | not read by the map store |
 | `trace` | string array; attributes `trace_file`, `trace_offset`, `events_not_copied` | `run_file.py:192-196` | not read by the map store |
@@ -208,7 +215,7 @@ required fields:
 
 | Writer | `kind` | `source` | Other fields |
 | :-- | :-- | :-- | :-- |
-| `eds_pois` (`map_tools.py:103-122`) | `"eds_point"` | `"run"` | `id` = `<run name>:eds:<tile>`, `links` = `[spectrum key]`, `score` null |
+| `eds_pois` (`map_tools.py:103-122`) | `"eds_point"` | `"run"` | One per non-empty entry of the run's `spectrum_keys`. `id` = `<run name>:eds:<tile>`, `links` = `[spectrum key]`, `score` null. `x_m`, `y_m`: the point of the stitched tile where the spectrum was taken, the run's `spectra_at` (tile centre without it). A tile offset `(f - 0.5) * shape` in (row, col) pixels from the tile centre is turned into map pixels with the inverse of `scan_linear_applied`, then into stage metres by 2.5. |
 | `score_map` (`map_tools.py:467-472`) | `"candidate"` | `"scorer:<name>"` | `score`, `scorer_version`, `window_m`; `tag` when given; `id` = `<tag>:region:<k>` or 8 hex |
 | `add_poi` (`map_tools.py:769`) | the caller's, default `"note"` | `"agent"` | `id` given or 8 hex |
 

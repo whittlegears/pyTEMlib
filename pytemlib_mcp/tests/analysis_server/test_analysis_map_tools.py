@@ -13,8 +13,10 @@ from fastmcp import Client
 jsonschema = pytest.importorskip("jsonschema")  # the job replies are validated against the envelope schema
 
 from pytemlib_mcp.analysis_server import create_server
-from pytemlib_mcp.analysis_server.map_tools import MapTools, drift_measured, measured_drift_only
+from pytemlib_mcp.analysis_server.map_store import MapStore, pixel_to_stage
+from pytemlib_mcp.analysis_server.map_tools import MapTools, drift_measured, eds_pois, measured_drift_only
 from pyTEMlib.image_tools import BaselineScorer
+from pyTEMlib.image_tools.image_mosaic import Placement
 from tests.conftest import PIXEL, TILE, make_tiles
 
 
@@ -644,3 +646,90 @@ def test_a_gathered_run_and_its_map_are_saved_as_local_files_when_the_server_is_
     with pytest.raises(ValueError, match="outside the directories"):
         outside.collect_run(["img0.h5"], stage_xy_m=[[0.0, 0.0]], fov_m=TILE * PIXEL)
     assert not (tmp_path / "maps2").exists() or not list((tmp_path / "maps2").iterdir())
+
+
+def gathered_with_spectra(tmp_path, spectra_at):
+    tiles, _truth = make_tiles(stage_error_px=6.0, grid=3)
+    remote = _Container()
+    for t in tiles:
+        remote.create_container(f"img{t.index}.h5").create_container("image").write_array(t.image.astype(np.uint16), "HAADF", {})
+    store = MapStore(None, local_roots=[tmp_path])
+    store._client = remote
+    tools = MapTools(store, local_runs=tmp_path / "maps")
+    spectra = [f"eds{t.index}.h5" if t.index % 2 == 0 else "" for t in tiles]
+    out = tools.collect_run([f"img{t.index}.h5" for t in tiles], {"workflow": "map_sample"},
+                            stage_xy_m=[[t.stage_xy_m[0] + TILE * PIXEL / 2, t.stage_xy_m[1] + TILE * PIXEL / 2] for t in tiles],
+                            fov_m=TILE * PIXEL, spectrum_keys=spectra, spectra_at=spectra_at)
+    return tools, out, spectra
+
+
+def test_a_gathered_run_with_spectra_gives_an_eds_point_where_each_was_taken_on_its_stitched_tile(tmp_path):
+    tools, out, spectra = gathered_with_spectra(tmp_path, [0.25, 0.75])
+    run = out["run"]
+    assert out["spectra"] == 5
+    with h5py.File(run, "r") as h5:
+        assert [k.decode() for k in h5["spectrum_keys"][()]] == spectra and list(h5.attrs["spectra_at"]) == [0.25, 0.75]
+    result = tools._run_assemble({"run": run, "refine": True, "eds_pois": True}, lambda *a: None)
+    assert result["summary"]["eds_pois"] == 5
+    key = result["result_keys"]["map"]
+    meta = tools.store.map_metadata(key)
+    inverse = np.linalg.inv(np.asarray(meta["scan_linear_applied"]))
+    points = {p["links"][0]: p for p in tools.store.list_pois(key, kind="eds_point")}
+    assert sorted(points) == sorted(k for k in spectra if k)
+    for index, spectrum in enumerate(spectra):
+        if not spectrum:
+            continue
+        row, col = np.asarray(meta["tile_positions_px"][index]) + (TILE - 1) / 2 + inverse @ [0.25 * TILE, -0.25 * TILE]
+        x, y = pixel_to_stage(meta, row, col)
+        assert (points[spectrum]["x_m"], points[spectrum]["y_m"]) == pytest.approx((x, y), abs=1e-3 * PIXEL)
+        assert points[spectrum]["id"].endswith(f":eds:{index}")
+    assert tools.map_info(key)["poi_kinds"][0]["kind"] == "eds_point"
+
+
+def test_spectra_at_the_centre_go_at_the_tile_centre_and_a_scan_stretch_moves_a_point_off_centre(tmp_path):
+    tools, out, spectra = gathered_with_spectra(tmp_path, [0.5, 0.5])
+    run = tools.store.open_run(out["run"])
+    try:
+        positions = np.array([[0.0, 0.0], [0.0, 60.0], [0.0, 120.0], [60.0, 0.0], [60.0, 60.0], [60.0, 120.0], [120.0, 0.0], [120.0, 60.0], [120.0, 120.0]])
+        stretch = np.array([[1.1, 0.0], [0.0, 1.0]])
+        placement = Placement(positions, positions, [], (184, 184), (0.0, 0.0), PIXEL, linear=stretch)
+        centred = eds_pois(run, placement)
+        assert [v for p in centred for v in (p["x_m"], p["y_m"])] == pytest.approx(
+            [v for k in range(0, 9, 2) for v in ((positions[k, 1] + (TILE - 1) / 2) * PIXEL, (positions[k, 0] + (TILE - 1) / 2) * PIXEL)])
+    finally:
+        run.close()
+
+    tools, out, _spectra = gathered_with_spectra(tmp_path / "off", [0.5, 1.0])
+    run = tools.store.open_run(out["run"])
+    try:
+        placement = Placement(positions, positions, [], (184, 184), (0.0, 0.0), PIXEL, linear=np.array([[2.0, 0.0], [0.0, 1.0]]))
+        first = eds_pois(run, placement)[0]
+        assert first["x_m"] == pytest.approx((TILE - 1) / 2 * PIXEL)
+        assert first["y_m"] == pytest.approx(((TILE - 1) / 2 + TILE / 2 / 2.0) * PIXEL)
+    finally:
+        run.close()
+
+
+def test_collect_run_refuses_spectra_that_do_not_line_up_or_say_where_they_were_taken(tmp_path):
+    tiles, _truth = make_tiles(stage_error_px=6.0, grid=2)
+    remote = _Container()
+    for t in tiles:
+        remote.create_container(f"img{t.index}.h5").create_container("image").write_array(t.image.astype(np.uint16), "HAADF", {})
+    store = MapStore(None, local_roots=[tmp_path])
+    store._client = remote
+    tools = MapTools(store, local_runs=tmp_path / "maps")
+    keys = [f"img{t.index}.h5" for t in tiles]
+    placed = {"stage_xy_m": [list(t.stage_xy_m) for t in tiles], "fov_m": TILE * PIXEL}
+    with pytest.raises(ValueError, match="one per image"):
+        tools.collect_run(keys, spectrum_keys=["a"], spectra_at=[0.5, 0.5], **placed)
+    with pytest.raises(ValueError, match="needs spectra_at"):
+        tools.collect_run(keys, spectrum_keys=["a", "", "", ""], **placed)
+    with pytest.raises(ValueError, match="fractions of the image"):
+        tools.collect_run(keys, spectrum_keys=["a", "", "", ""], spectra_at=[0.5, 1.5], **placed)
+    with pytest.raises(ValueError, match="give spectrum_keys with it"):
+        tools.collect_run(keys, spectra_at=[0.5, 0.5], **placed)
+    assert not (tmp_path / "maps").exists() or not list((tmp_path / "maps").iterdir())
+    out = tools.collect_run(keys, **placed)
+    assert "spectra" not in out
+    with h5py.File(out["run"], "r") as h5:
+        assert "spectrum_keys" not in h5 and "spectra_at" not in h5.attrs

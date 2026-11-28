@@ -54,11 +54,11 @@ def served(tiled):
     loop.close()
 
 
-def write_images(client):
+def write_images(client, prefix="img"):
     tiles, _truth = make_tiles(stage_error_px=4.0, grid=3)
     keys = []
     for t in tiles:
-        key = f"img_{t.index}"
+        key = f"{prefix}_{t.index}"
         client.create_container(key).create_container("image").write_array(t.image.astype(np.uint16), key="HAADF", metadata={
             "pixel_size_m": PIXEL, "stage_reported_m": json.dumps([t.stage_xy_m[0], t.stage_xy_m[1], 0.0, 0.0, 0.0]),
             "axes": "rows=+y, columns=+x", "scan_region": "[0.0, 0.0, 1.0, 1.0]"})
@@ -145,3 +145,29 @@ def test_image_info_refuses_a_stack_of_tiles_and_names_list_tiles(served):
     refused = call("image_info", dataset="stack")
     assert refused["error"]["code"] == "no_image"
     assert f"holds {len(tiles)} images" in refused["error"]["message"] and "list_tiles" in refused["error"]["message"]
+
+
+def test_a_run_gathered_in_tiled_with_spectra_gives_eds_points_where_they_were_taken(served):
+    call, tools, client = served
+    keys, tiles = write_images(client, prefix="eds_img")
+    for t in tiles[::4]:
+        client.create_container(f"eds_{t.index}")
+    spectra = [f"eds_{t.index}" if t.index % 4 == 0 else "" for t in tiles]
+    gathered = call("collect_map_run", image_keys=keys, spectrum_keys=spectra, spectra_at=[0.5, 0.25])
+    assert gathered["spectra"] == 3
+    run = gathered["run"]
+    assert [str(k) for k in client[run]["spectrum_keys"].read()] == spectra and dict(client[run].metadata)["spectra_at"] == [0.5, 0.25]
+
+    done = finish(call, tools, call("assemble_map", run=run))
+    assert done["summary"]["eds_pois"] == 3
+    key = done["result_keys"]["map"]
+    assert [k["kind"] for k in call("map_info", map=key)["poi_kinds"]] == ["eds_point"]
+    meta = tools.store.map_metadata(key)
+    inverse = np.linalg.inv(np.asarray(meta["scan_linear_applied"]))
+    points = call("list_pois", map=key, kind="eds_point")["pois"]
+    assert sorted(p["links"][0] for p in points) == sorted(k for k in spectra if k)
+    for point in points:
+        index = spectra.index(point["links"][0])
+        rows, cols = tiles[index].image.shape
+        row, col = np.asarray(meta["tile_positions_px"][index]) + (np.array([rows, cols]) - 1) / 2 + inverse @ [-0.25 * rows, 0.0]
+        assert (point["x_m"], point["y_m"]) == pytest.approx(pixel_to_stage(meta, row, col), abs=1e-11)

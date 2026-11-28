@@ -273,14 +273,21 @@ class TileSource:
             return ""
 
     def dataset(self, name: str) -> np.ndarray | None:
-        """A whole per-tile array of a layout-2 run (e.g. ``spectrum_keys``), or None if the run has none."""
-        if self.info.layout < 2:
-            return None
+        """A whole per-tile array beside the run's tiles (e.g. ``spectrum_keys``), or None if the run has none."""
         if self.local:
             with h5py.File(self.run, "r") as h5:
                 return h5[name][()] if name in h5 else None
         node = self.store.client[self.run]
         return np.asarray(node[name].read()) if name in node else None
+
+    def attribute(self, name: str) -> Any:
+        """One of the run's own attributes (local) or metadata (Tiled), decoded; None if the run has none."""
+        if self.local:
+            with h5py.File(self.run, "r") as h5:
+                value = h5.attrs.get(name)
+        else:
+            value = dict(self.store.client[self.run].metadata).get(name)
+        return None if value is None else _decode(value)
 
     def close(self) -> None:
         self._cache.clear()

@@ -87,15 +87,22 @@ def _loads(request: str | dict) -> dict:
 
 
 def eds_pois(run, placement) -> list[dict]:
-    """A point of interest for every EDS point spectrum of a layout-2 run, at its tile's stitched centre.
+    """A point of interest for every EDS point spectrum of a run (its ``spectrum_keys``), where on its tile it was taken.
 
-    Ids are the run and tile, so stitching the same run again gives the same points.
+    That place is the run's ``spectra_at``, [x, y] fractions of the tile image from the left and from the top, the same
+    for every tile. A run without it is a Mapper run, whose spectra are taken at the tile centre. The point follows the
+    tile's stitched position and the scan's stretch and turn the stitch removed. Ids are the run and tile, so stitching
+    the same run again gives the same points.
     """
     keys = run.source.dataset("spectrum_keys")
     if keys is None:
         return []
+    at = run.source.attribute("spectra_at")
+    fx, fy = (0.5, 0.5) if at is None else (float(at[0]), float(at[1]))
     info = run.tiles.info
-    centres = placement.positions_px + info.shapes / 2.0 - 0.5
+    shapes = np.asarray(info.shapes, dtype=np.float64)
+    offsets = (np.array([fy, fx]) - 0.5) * shapes @ np.linalg.inv(np.asarray(placement.linear, dtype=np.float64)).T
+    points = placement.centres_px(shapes) + offsets
     run_name = Path(str(run.run)).name
     out = []
     for k, index in enumerate(info.index):
@@ -103,7 +110,7 @@ def eds_pois(run, placement) -> list[dict]:
         key = key.decode() if isinstance(key, bytes) else str(key)
         if not key:
             continue
-        x, y = placement.pixel_to_stage(centres[k, 0], centres[k, 1])
+        x, y = placement.pixel_to_stage(points[k, 0], points[k, 1])
         out.append({"id": f"{run_name}:eds:{int(index)}", "x_m": float(x), "y_m": float(y), "kind": "eds_point", "source": "run", "score": None, "scorer_version": None, "reason": f"EDS point spectrum of tile {int(index)}", "links": [key]})
     return out
 
@@ -218,7 +225,7 @@ class MapTools:
         )
         progress(int(0.7 * PROGRESS_STEPS), PROGRESS_STEPS)
         self._check_canvas(placement.canvas_shape)  # refinement can grow the canvas by a few pixels
-        # Each EDS point spectrum of the run goes at its tile's stitched centre, linked to its key.
+        # Each EDS point spectrum of the run goes where it was taken on its stitched tile, linked to its key.
         # They replace the run's EDS points from an earlier stitch. Every other point stays with the run.
         eds = eds_pois(run, placement) if plan.get("eds_pois") else None
         previous = self.store.current_map(plan["run"])
@@ -309,13 +316,19 @@ class MapTools:
         return result
 
     def collect_run(self, image_keys: list[str], plan: dict | None = None, stage_xy_m: list[list[float]] | None = None,
-                    fov_m: float | None = None) -> dict[str, Any]:
+                    fov_m: float | None = None, spectrum_keys: list[str] | None = None,
+                    spectra_at: list[float] | None = None) -> dict[str, Any]:
         """Gather single images into one map run in Tiled. The run is a ``tiles`` container of placed arrays.
 
         Each image is placed by what its acquisition recorded, read with ``frame_of``. An image that does not say
         where it was taken is placed by the caller's reading instead. ``stage_xy_m[k]`` is the stage position image k
         was taken at and ``fov_m`` is the width of every image, with rows along +y and columns along +x. Without them
         such an image is refused by name before anything is written.
+
+        ``spectrum_keys[k]`` is the key of the EDS point spectrum taken on image k, "" for none. ``spectra_at`` is
+        where on every image they were taken, [x, y] fractions from the left and from the top; it is needed with them.
+        The run keeps both (``spectrum_keys`` beside ``tiles``, ``spectra_at`` in its metadata), so its map gets an
+        EDS point of interest for each.
 
         With ``local_runs`` set the run is an HDF5 file in that folder with the same layout, and the images are only
         read from Tiled.
@@ -333,6 +346,7 @@ class MapTools:
             for k, xy in enumerate(stage_xy_m):
                 if not (isinstance(xy, (list, tuple)) and len(xy) >= 2 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in xy[:2])):
                     raise ValueError(f"stage_xy_m[{k}] is not [x, y] in metres: {str(xy)[:80]}")
+        spectra = self._spectra(keys, spectrum_keys, spectra_at)
         client = getattr(self.store, "client", None)
         if client is None:
             raise ValueError("gathering a run needs the Tiled server; this analysis server was started without one")
@@ -366,11 +380,15 @@ class MapTools:
             "kind": "map_run", "run_layout": 1, "id": uuid.uuid4().hex, "plan": json.dumps(plan or {}), "source": "workflow",
             "tiles": len(keys), "created": time.time(), **(frames[0].get("sample") or {}),
         }
+        if spectra is not None:
+            metadata["spectra_at"] = spectra["spectra_at"]
         if self.local_runs is not None:
-            name = self._write_local_run(name, metadata, keys, frames)
+            name = self._write_local_run(name, metadata, keys, frames, spectra)
         else:
-            self._write_tiled_run(client, name, metadata, keys, frames)
+            self._write_tiled_run(client, name, metadata, keys, frames, spectra)
         out = {"run": name, "tiles": len(keys), "pixel_size_m": float(frames[0]["pixel_size_m"])}
+        if spectra is not None:
+            out["spectra"] = sum(1 for key in spectra["spectrum_keys"] if key)
         if given:
             out["placed_by_caller"] = len(given)
             out["note"] = (f"{len(given)} of {len(keys)} images do not record where they were taken or the image shift they were taken with "
@@ -378,10 +396,30 @@ class MapTools:
                            "stage positions given, as full fields with rows along +y and columns along +x")
         return out
 
-    def _write_tiled_run(self, client, name: str, metadata: dict, keys: list[str], frames: list[dict]) -> None:
+    @staticmethod
+    def _spectra(keys: list[str], spectrum_keys: list[str] | None, spectra_at: list[float] | None) -> dict | None:
+        """The checked spectrum keys and their place on the tile, or None when the run has no spectra."""
+        if spectrum_keys is None:
+            if spectra_at is not None:
+                raise ValueError("spectra_at is where the spectra were taken; give spectrum_keys with it")
+            return None
+        if len(spectrum_keys) != len(keys):
+            raise ValueError(f"spectrum_keys has {len(spectrum_keys)} entries for {len(keys)} images; give one per image, \"\" where none was taken")
+        if not all(isinstance(key, str) for key in spectrum_keys):
+            raise ValueError("spectrum_keys must be strings: a spectrum's data key, or \"\" where none was taken")
+        if spectra_at is None:
+            raise ValueError("spectrum_keys needs spectra_at, where on each image the spectra were taken: [x, y] fractions from the left and the top")
+        if not (isinstance(spectra_at, (list, tuple)) and len(spectra_at) == 2
+                and all(isinstance(v, (int, float)) and math.isfinite(v) and 0.0 <= v <= 1.0 for v in spectra_at)):
+            raise ValueError(f"spectra_at must be [x, y], fractions of the image from 0 to 1, not {str(spectra_at)[:80]}")
+        return {"spectrum_keys": list(spectrum_keys), "spectra_at": [float(v) for v in spectra_at]}
+
+    def _write_tiled_run(self, client, name: str, metadata: dict, keys: list[str], frames: list[dict], spectra: dict | None) -> None:
         """Write the run as a Tiled container. A partly written run is deleted."""
         run = client.create_container(name, metadata=metadata)
         try:
+            if spectra is not None:
+                run.write_array(np.array(spectra["spectrum_keys"], dtype=str), key="spectrum_keys")
             tiles = run.create_container("tiles")
             for k, (key, frame) in enumerate(zip(keys, frames)):
                 tiles.write_array(self._tile_array(key), key=f"tile_{k:05d}", metadata={
@@ -401,7 +439,7 @@ class MapTools:
             array = array[0]
         return array
 
-    def _write_local_run(self, name: str, metadata: dict, keys: list[str], frames: list[dict]) -> str:
+    def _write_local_run(self, name: str, metadata: dict, keys: list[str], frames: list[dict], spectra: dict | None) -> str:
         """Write the run as ``<local_runs>/<name>.h5`` and return its path. A partly written file is removed."""
         self.local_runs.mkdir(parents=True, exist_ok=True)
         path = (self.local_runs / f"{name}.h5").resolve()
@@ -413,6 +451,8 @@ class MapTools:
             with h5py.File(partial, "w") as h5:
                 for field, value in metadata.items():
                     h5.attrs[field] = value
+                if spectra is not None:
+                    h5.create_dataset("spectrum_keys", data=spectra["spectrum_keys"], dtype=h5py.string_dtype())
                 tiles = h5.create_group("tiles")
                 for k, (key, frame) in enumerate(zip(keys, frames)):
                     tile = tiles.create_dataset(f"tile_{k:05d}", data=self._tile_array(key))
@@ -616,7 +656,8 @@ class MapTools:
 
         @mcp.tool()
         def collect_map_run(image_keys: list[str], plan: dict | None = None, stage_xy_m: list[list[float]] | None = None,
-                            fov_m: float | None = None) -> dict[str, Any]:
+                            fov_m: float | None = None, spectrum_keys: list[str] | None = None,
+                            spectra_at: list[float] | None = None) -> dict[str, Any]:
             """Gather single scanned images into one map run, so tiles taken one by one (a workflow's tile loop) can
             be stitched with assemble_map. Not needed for a Mapper job: its results already name a run.
 
@@ -624,10 +665,14 @@ class MapTools:
             plan: facts to keep with the run (size, field of view, the workflow's name).
             stage_xy_m, fov_m: optional; the stage [x, y] each image was taken at and the width of every image
             (metres). They place an image that does not record where it was taken; without them it is refused.
-            Returns {"run": the run's key for assemble_map, "tiles": how many}.
+            spectrum_keys: optional; one per image, in the same order, the key of the EDS point spectrum taken on it,
+            "" for none. assemble_map then marks each as a point of interest where it was taken.
+            spectra_at: with spectrum_keys, where on every image the spectra were taken: [x, y] fractions of the image,
+            x from the left, y from the top.
+            Returns {"run": the run's key for assemble_map, "tiles": how many, "spectra": how many, with spectrum_keys}.
             """
             try:
-                return tools.collect_run(image_keys, plan, stage_xy_m, fov_m)
+                return tools.collect_run(image_keys, plan, stage_xy_m, fov_m, spectrum_keys, spectra_at)
             except ValueError as exc:
                 return {"error": {"code": "bad_request", "message": str(exc)}}
 

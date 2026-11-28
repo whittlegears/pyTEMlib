@@ -133,6 +133,10 @@ def test_every_eds_spectrum_is_a_point_of_interest_and_restitching_keeps_one_eac
     store = tools.store
     eds = store.list_pois(key, kind="eds_point")
     assert len(eds) == 9 and {p["links"][0] for p in eds} == {f"spectrum_{k}.h5" for k in range(9)}
+    meta = store.map_metadata(key)
+    for point in eds:  # a Mapper run records no spectra_at: its spectra are taken at the tile centre
+        row, col = np.asarray(meta["tile_positions_px"][int(point["id"].rsplit(":", 1)[1])]) + (TILE - 1) / 2
+        assert (point["x_m"], point["y_m"]) == pytest.approx(map_store.pixel_to_stage(meta, row, col), abs=1e-3 * PIXEL)
     store.add_pois(key, [{"id": "note1", "x_m": eds[0]["x_m"], "y_m": eds[0]["y_m"], "kind": "note"}])
     job = tools.jobs.start(tools.jobs.reserve({"task": "assemble_map", "run": path, "eds_pois": True, "refine": False})["reservation_id"])
     assert tools.jobs.wait(job["job_id"])["state"] == "done"
