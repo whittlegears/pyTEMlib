@@ -121,7 +121,10 @@ def image_descriptor(store, key: str) -> dict[str, Any]:
                 "frame": {"pixel_size_m": pixel, "origin_xy_m": origin, "centre_xy_m": centre, "axes": view["axes"]}, **store.sample_of(key)}
     node, array_key = image_array(store, key)
     structure = node.structure()
-    described = {"kind": "image", "image": array_key, "shape": [int(v) for v in structure.shape][-2:], "dtype": structure.data_type.to_numpy_dtype().str,
+    if len(structure.shape) > 2:
+        count = math.prod(int(v) for v in structure.shape[:-2])
+        raise FrameError(f"{key} holds {count} images in {array_key}, not one; list_tiles gives each tile and its stage position")
+    described = {"kind": "image", "image": array_key, "shape": [int(v) for v in structure.shape], "dtype": structure.data_type.to_numpy_dtype().str,
                  "chunks": [[int(v) for v in axis] for axis in structure.chunks]}
     try:
         frame = frame_of(store, key)

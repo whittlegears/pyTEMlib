@@ -134,3 +134,14 @@ def test_a_run_written_to_tiled_is_stitched_listed_read_and_its_points_come_back
     on_map = call("image_info", dataset=key)
     validator("image_info").validate(on_map)
     assert on_map["kind"] == "map" and on_map["image"] == f"{key}/level_0"
+
+
+def test_image_info_refuses_a_stack_of_tiles_and_names_list_tiles(served):
+    call, _tools, client = served
+    tiles, _truth = make_tiles(stage_error_px=4.0, grid=3)
+    stack = np.stack([t.image.astype(np.uint16) for t in tiles])
+    client.create_container("stack").create_container("image").write_array(stack, key="HAADF", metadata={
+        "pixel_size_m": PIXEL, "axes": "rows=+y, columns=+x"})
+    refused = call("image_info", dataset="stack")
+    assert refused["error"]["code"] == "no_image"
+    assert f"holds {len(tiles)} images" in refused["error"]["message"] and "list_tiles" in refused["error"]["message"]
