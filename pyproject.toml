@@ -56,8 +56,6 @@ dependencies = [
     "npm>=0.1.1",
     "pip>=26.0.1",
     "jupyter>=1.1.1",
-    "fastmcp>=3.2.4",
-    "ollama>=0.6.2",
     "nest-asyncio>=1.6.0",
 ]
 
