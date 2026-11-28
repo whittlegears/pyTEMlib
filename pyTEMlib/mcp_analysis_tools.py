@@ -424,16 +424,18 @@ def register(mcp, loaded_datasets=None, tiled_uri=None, output_dir=None):
         return _json(optimization_tools.linear_trend(x, y, confidence, transform))
 
     @mcp.tool()
-    def map_create(map_dir: str, pixel_size: float, axis_signs: list = None) -> str:
+    def map_create(map_dir: str, pixel_size: float, stage_to_image: list = None) -> str:
         """Start an empty tile map in a directory, to stitch images taken at known stage positions.
 
         pixel_size: image pixel size, in the same unit as the stage positions passed to map_add_tile.
-        axis_signs: [sign_x, sign_y] relating stage x, y to image column, row (instrument-specific;
-        default [1, 1]). Each map step is a separate call; the map is stored in the directory.
+        stage_to_image: 2x2 matrix mapping a stage move (x, y) to an image move (row, column); default
+        [[0, 1], [1, 0]] (x along columns, y along rows). Instrument-specific: measure it once by moving
+        the stage and measuring the image shift. Each map step is a separate call; the map is stored
+        in the directory.
         """
-        manifest = image_mosaic.create_map(map_dir, pixel_size, tuple(axis_signs or (1.0, 1.0)))
+        manifest = image_mosaic.create_map(map_dir, pixel_size, stage_to_image or ((0.0, 1.0), (1.0, 0.0)))
         return _json({'map_dir': os.path.abspath(map_dir), 'pixel_size': manifest['pixel_size'],
-                      'axis_signs': manifest['axis_signs']})
+                      'stage_to_image': manifest['stage_to_image']})
 
     @mcp.tool()
     def map_add_tile(map_dir: str, source: str, position: list, dataset_key: str = None, labels: str = None,

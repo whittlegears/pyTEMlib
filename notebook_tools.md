@@ -41,7 +41,11 @@ parameters instead of constants, and leave instrument control to the caller.
   `map_add_tile` and `map_summary` place tiles from stage positions, refine placement by
   matching each tile's overlap with the map, and, when a tile comes with a label image from
   any segmentation, join regions that a tile edge cut in two. Segmenting while stitching is
-  therefore possible without being required: pass `labels` or leave it out.
+  therefore possible without being required: pass `labels` or leave it out. The stage-to-image
+  relation is a 2x2 matrix (sign flips, swapped axes, scan rotation), measured once per
+  instrument. A placement correction is kept only when the overlap match is clearly better
+  than the stage placement: periodic (lattice-resolved) or featureless overlaps give several
+  near-equal matches, and then the stage position is trusted.
 
 ## What changed from the notebook versions
 

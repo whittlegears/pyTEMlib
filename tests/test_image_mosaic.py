@@ -98,11 +98,18 @@ class TestTileMap(unittest.TestCase):
         self.assertEqual(stitched[0, 0], 2.0)
         self.assertEqual(stitched[-1, -1], 1.0)
 
-    def test_axis_signs_mirror_placement(self):
-        image_mosaic.create_map(self.map_dir, pixel_size=1.0, axis_signs=(-1.0, 1.0))
+    def test_stage_to_image_matrix(self):
+        image_mosaic.create_map(self.map_dir, pixel_size=1.0, stage_to_image=[[0.0, 1.0], [-1.0, 0.0]])
         image_mosaic.add_tile(self.map_dir, np.ones((20, 20)), (0, 0), refine=False)
         result = image_mosaic.add_tile(self.map_dir, 2 * np.ones((20, 20)), (30, 0), refine=False)
         self.assertEqual(result['top_left_px'][1], 0)
+        rotated = os.path.join(self.directory, 'rotated')
+        image_mosaic.create_map(rotated, pixel_size=1.0, stage_to_image=[[1.0, 0.0], [0.0, 1.0]])
+        image_mosaic.add_tile(rotated, np.ones((20, 20)), (0, 0), refine=False)
+        result = image_mosaic.add_tile(rotated, np.ones((20, 20)), (30, 0), refine=False)
+        self.assertEqual(result['top_left_px'], [30, 0])
+        with self.assertRaises(ValueError):
+            image_mosaic.create_map(os.path.join(self.directory, 'bad'), 1.0, [[1, 1], [1, 1]])
 
 
 class TestMergeLabels(unittest.TestCase):
@@ -127,3 +134,16 @@ class TestMergeLabels(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRefinementConfidence(unittest.TestCase):
+    def test_periodic_overlap_keeps_the_stage_placement(self):
+        directory = tempfile.mkdtemp()
+        map_dir = os.path.join(directory, 'map')
+        rows, columns = np.indices((100, 240))
+        stripes = np.cos(2 * np.pi * columns / 10.0) + 0.01 * np.random.default_rng(0).random((100, 240))
+        image_mosaic.create_map(map_dir, pixel_size=1.0)
+        image_mosaic.add_tile(map_dir, stripes[:, :120], (60, 50))
+        result = image_mosaic.add_tile(map_dir, stripes[:, 80:200], (140, 50), max_shift_px=20)
+        self.assertEqual(result['refinement_px'], [0.0, 0.0])
+        self.assertFalse(result['overlap_match']['accepted'])
