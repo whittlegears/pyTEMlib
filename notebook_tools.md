@@ -27,6 +27,22 @@ parameters instead of constants, and leave instrument control to the caller.
 | 16 alpha-tilt diffraction map (drift tracking) | `image_tools.image_alignment`: `cross_correlation_shift`, `fourier_shift`, `align_image_stack`, `align_and_average`, `stage_drift_correction`; `diffraction_tools.four_d_stem.tilt_series_map` | `measure_image_shift`, `align_image_series` |
 | 15 MAPED | `diffraction_tools.four_d_stem`: `maped_average`, `virtual_image`, `mean_diffraction_pattern`, `center_of_mass_shifts`, `align_cube_patterns`, `align_cube_scan` | `maped_average_cubes`, `four_d_stem_virtual_image` |
 
+## Optional ML tools and tile maps
+
+- `ml_tools.bayesian_optimization` (from asyncroscopy's `AberrationsBO.ipynb`): Gaussian-process
+  Bayesian optimisation of one score (`bo_suggest_next_setting`) or several
+  (`bo_suggest_pareto_setting`). Install with `pip install 'pyTEMlib[ml]'`.
+- `ml_tools.sam2_segmentation` (from asyncroscopy's SAM2 segmentation device): Segment Anything 2
+  on any image or data key (`segment_image_sam2`). Additionally needs
+  `pip install "git+https://github.com/facebookresearch/sam2.git" huggingface-hub`.
+- The MCP server registers these tools only when their packages are installed;
+  `analysis_capabilities` says which are missing and how to install them.
+- `image_tools.image_mosaic` (not ML): tile maps stored in a directory. `map_create`,
+  `map_add_tile` and `map_summary` place tiles from stage positions, refine placement by
+  matching each tile's overlap with the map, and, when a tile comes with a label image from
+  any segmentation, join regions that a tile edge cut in two. Segmenting while stitching is
+  therefore possible without being required: pass `labels` or leave it out.
+
 ## What changed from the notebook versions
 
 - **Diffraction rings.** The notebook found only the first ring, assumed it was FCC

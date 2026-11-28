@@ -117,7 +117,13 @@ if __name__ == '__main__':
 def _tiled_available():
     import shutil
     import importlib.util
-    return shutil.which('tiled') is not None and importlib.util.find_spec('h5py') is not None
+    if shutil.which('tiled') is None or importlib.util.find_spec('h5py') is None:
+        return False
+    try:
+        import tiled.server.app  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 @unittest.skipUnless(fastmcp_available and _tiled_available(), 'fastmcp, tiled server or h5py not installed')
@@ -198,3 +204,43 @@ class TestDataKeysFromTiled(unittest.TestCase):
         result = self.call('compute_image_metrics', {'source': 'no_such_acquisition'})
         self.assertTrue(result.is_error)
         self.assertIn('no_such_acquisition', result.content[0].text)
+
+
+@unittest.skipUnless(fastmcp_available, 'fastmcp not installed')
+class TestTileMapTools(unittest.TestCase):
+    """Stitching with per-tile segmentation, entirely through MCP calls."""
+
+    def test_segment_each_tile_while_stitching(self):
+        directory = tempfile.mkdtemp()
+        server = FastMCP('test')
+        mcp_analysis_tools.register(server, {}, output_dir=directory)
+        rows, columns = np.indices((120, 200))
+        scene = 0.1 + 0.05 * ndimage.gaussian_filter(np.random.default_rng(0).random((120, 200)), 2)
+        scene[(rows - 60) ** 2 + (columns - 100) ** 2 < 15 ** 2] += 1.0
+        for name, (left, error) in {'left': (0, 0.0), 'right': (80, 3.0)}.items():
+            np.save(os.path.join(directory, f'{name}.npy'), scene[:, left:left + 120])
+
+        async def run():
+            async with Client(server) as client:
+                async def call(tool, arguments):
+                    return json.loads((await client.call_tool(tool, arguments)).content[0].text)
+                await call('map_create', {'map_dir': os.path.join(directory, 'map'), 'pixel_size': 1.0})
+                results = []
+                for name, (left, error) in {'left': (0, 0.0), 'right': (80, 3.0)}.items():
+                    tile = os.path.join(directory, f'{name}.npy')
+                    labels = await call('segment_image', {'source': tile})
+                    results.append(await call('map_add_tile', {
+                        'map_dir': os.path.join(directory, 'map'), 'source': tile,
+                        'position': [left + 60 + error, 60], 'labels': labels['labels_file']}))
+                summary = await call('map_summary', {'map_dir': os.path.join(directory, 'map')})
+                capabilities = await call('analysis_capabilities', {})
+                return results, summary, capabilities
+
+        results, summary, capabilities = asyncio.run(run())
+        self.assertEqual(results[1]['regions_joined'], 1)
+        self.assertEqual(results[1]['refinement_px'], [0.0, -3.0])
+        self.assertEqual(summary['map_shape'], [120, 200])
+        self.assertEqual(len(summary['regions']), 1)
+        self.assertAlmostEqual(summary['regions'][0]['equivalent_radius'], 15, delta=1.5)
+        self.assertEqual(np.load(summary['map_labels_file']).max(), 1)
+        self.assertEqual(set(capabilities), {'bayesian_optimization', 'sam2_segmentation'})

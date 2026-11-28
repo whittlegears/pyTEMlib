@@ -25,7 +25,22 @@ from PIL import Image
 
 from . import optimization_tools
 from .diffraction_tools import four_d_stem, ring_analysis
-from .image_tools import image_alignment, image_metrics, image_segmentation, sparse_reconstruction
+from .image_tools import image_alignment, image_metrics, image_mosaic, image_segmentation, sparse_reconstruction
+
+try:
+    from .ml_tools import bayesian_optimization
+    bayesian_optimization_missing = None
+except ImportError as error:
+    bayesian_optimization = None
+    bayesian_optimization_missing = f"{error}; install with pip install 'pyTEMlib[ml]'"
+
+try:
+    from .ml_tools import sam2_segmentation
+    sam2_missing = None
+except ImportError as error:
+    sam2_segmentation = None
+    sam2_missing = (f"{error}; install with pip install 'pyTEMlib[ml]' "
+                    "'git+https://github.com/facebookresearch/sam2.git' huggingface-hub")
 
 image_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
 
@@ -408,7 +423,110 @@ def register(mcp, loaded_datasets=None, tiled_uri=None, output_dir=None):
         transform = optimization_tools.smoothstep if smoothstep_x else None
         return _json(optimization_tools.linear_trend(x, y, confidence, transform))
 
-    return ['compute_image_metrics', 'segment_image', 'align_image_series', 'measure_image_shift',
-            'plan_sampling_mask', 'reconstruct_sparse_data', 'suggest_next_measurements',
-            'analyze_diffraction_rings', 'four_d_stem_virtual_image', 'maped_average_cubes',
-            'propose_next_setting', 'fit_parabola_vertex', 'fit_linear_trend']
+    @mcp.tool()
+    def map_create(map_dir: str, pixel_size: float, axis_signs: list = None) -> str:
+        """Start an empty tile map in a directory, to stitch images taken at known stage positions.
+
+        pixel_size: image pixel size, in the same unit as the stage positions passed to map_add_tile.
+        axis_signs: [sign_x, sign_y] relating stage x, y to image column, row (instrument-specific;
+        default [1, 1]). Each map step is a separate call; the map is stored in the directory.
+        """
+        manifest = image_mosaic.create_map(map_dir, pixel_size, tuple(axis_signs or (1.0, 1.0)))
+        return _json({'map_dir': os.path.abspath(map_dir), 'pixel_size': manifest['pixel_size'],
+                      'axis_signs': manifest['axis_signs']})
+
+    @mcp.tool()
+    def map_add_tile(map_dir: str, source: str, position: list, dataset_key: str = None, labels: str = None,
+                     refine: bool = True, max_shift_px: float = None, min_overlap_px: int = 10) -> str:
+        """Add one image tile to a tile map, optionally with its segmentation labels.
+
+        source: the tile image, a file path or data key. position: [x, y] stage position of the
+        tile centre. refine: correct the stage placement by matching the overlap with the map.
+        labels: optional label image of this tile (the labels_file from segment_image or
+        segment_image_sam2); its regions are joined with map regions they overlap by at least
+        min_overlap_px pixels, so a particle cut by a tile edge becomes one region.
+        """
+        image = load(source, dataset_key)[0]
+        label_image = None if labels is None else load(labels)[0]
+        return _json(image_mosaic.add_tile(map_dir, image, position, label_image, refine, max_shift_px,
+                                           min_overlap_px))
+
+    @mcp.tool()
+    def map_summary(map_dir: str, max_regions: int = 50) -> str:
+        """Stitched map and merged regions so far: writes map_image.npy and map_labels.npy into the map
+        directory and returns their paths, the map size and per-region statistics in map coordinates."""
+        summary = image_mosaic.map_summary(map_dir)
+        if summary['tiles']:
+            np.save(os.path.join(map_dir, 'map_image.npy'), image_mosaic.map_image(map_dir))
+            np.save(os.path.join(map_dir, 'map_labels.npy'), image_mosaic.map_labels(map_dir))
+            summary['map_image_file'] = os.path.abspath(os.path.join(map_dir, 'map_image.npy'))
+            summary['map_labels_file'] = os.path.abspath(os.path.join(map_dir, 'map_labels.npy'))
+        summary['regions_truncated'] = len(summary['regions']) > max_regions
+        summary['regions'] = summary['regions'][:max_regions]
+        return _json(summary)
+
+    @mcp.tool()
+    def analysis_capabilities() -> str:
+        """Which optional tool groups this server offers, and how to install the missing ones."""
+        return _json({'bayesian_optimization': bayesian_optimization_missing or 'available',
+                      'sam2_segmentation': sam2_missing or 'available'})
+
+    names = ['compute_image_metrics', 'segment_image', 'align_image_series', 'measure_image_shift',
+             'plan_sampling_mask', 'reconstruct_sparse_data', 'suggest_next_measurements',
+             'analyze_diffraction_rings', 'four_d_stem_virtual_image', 'maped_average_cubes',
+             'propose_next_setting', 'fit_parabola_vertex', 'fit_linear_trend',
+             'map_create', 'map_add_tile', 'map_summary', 'analysis_capabilities']
+
+    if bayesian_optimization is not None:
+        @mcp.tool()
+        def bo_suggest_next_setting(points: list, scores: list, bounds: list, maximize: bool = True,
+                                    acquisition: str = 'log_ei', beta: float = 2.0, seed: int = 0) -> str:
+            """Bayesian optimisation: the next setting to try for one score.
+
+            points: settings measured so far, one list per measurement (any number of parameters, at
+            least two measurements). scores: the measured score of each. bounds: [[low, high], ...] per
+            parameter; the suggestion stays inside them. acquisition: log_ei (expected improvement) or
+            ucb (upper confidence bound, beta sets exploration). Returns the suggestion with the model's
+            predicted score and standard deviation there. It only suggests; nothing is moved.
+            """
+            return _json(bayesian_optimization.suggest_setting(points, scores, bounds, maximize, acquisition,
+                                                               beta, seed))
+
+        @mcp.tool()
+        def bo_suggest_pareto_setting(points: list, objectives: list, bounds: list, maximize: list = None,
+                                      ref_point: list = None, seed: int = 0) -> str:
+            """Multi-objective Bayesian optimisation (expected hypervolume improvement).
+
+            objectives: one row per measured point with two or more scores (for example image contrast
+            and an FFT score). maximize: one flag per score, all true by default. Returns the next
+            setting, its predicted scores and which measured points are currently Pareto-optimal.
+            """
+            return _json(bayesian_optimization.suggest_pareto_setting(points, objectives, bounds, maximize,
+                                                                      ref_point, seed))
+
+        names += ['bo_suggest_next_setting', 'bo_suggest_pareto_setting']
+
+    if sam2_segmentation is not None:
+        @mcp.tool()
+        def segment_image_sam2(source: str, dataset_key: str = None, model_id: str = 'facebook/sam2-hiera-large',
+                               compute_device: str = 'auto', points_per_side: int = 48, iou_threshold: float = 0.57,
+                               stability_threshold: float = 0.75, min_area_px: int = 200, max_regions: int = 50,
+                               output_filename: str = None) -> str:
+            """Segment an image with SAM2 (Segment Anything 2) and report each region.
+
+            source: a file path or data key. model_id: a Hugging Face SAM2 model, e.g.
+            facebook/sam2-hiera-large (default) or facebook/sam2-hiera-tiny (faster). The model is
+            loaded once and reused. Regions smaller than min_area_px or covering half the image are
+            dropped. Writes the label image to .npy (labels_file), which map_add_tile accepts.
+            """
+            image = load(source, dataset_key)[0]
+            labels, statistics = sam2_segmentation.segment(image, model_id, compute_device, points_per_side,
+                                                           iou_threshold, stability_threshold, min_area_px)
+            path = output_path(source, 'sam2_labels', output_filename)
+            np.save(path, labels)
+            return _json({'labels_file': path, 'n_regions': len(statistics), 'model_id': model_id,
+                          'regions': statistics[:max_regions], 'regions_truncated': len(statistics) > max_regions})
+
+        names.append('segment_image_sam2')
+
+    return names
