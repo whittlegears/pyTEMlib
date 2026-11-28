@@ -5,7 +5,12 @@ This server provides MCP tools for analyzing TEM data using the pyTEMlib library
 It exposes key functionalities for file I/O, data analysis, and visualization.
 """
 
+import argparse
+import sys
+
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
 import functools
 import os
 import json
@@ -18,7 +23,7 @@ try:
     from pyTEMlib import utilities
     PYTEMLIB_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: pyTEMlib not available: {e}")
+    print(f"Warning: pyTEMlib not available: {e}", file=sys.stderr)
     PYTEMLIB_AVAILABLE = False
 
 # Create MCP server
@@ -256,7 +261,6 @@ BASIC_TOOLS = [
     "get_available_tools - List all available tools",
 ]
 
-# Tools that only read and compute. The analysis tools below are all of this kind.
 READ_ONLY_HINT = {"readOnlyHint": True}
 ANALYSIS_TOOLS: List[str] = []
 
@@ -265,13 +269,11 @@ def _first_line(function) -> str:
     return (function.__doc__ or "").strip().split("\n")[0].rstrip(".")
 
 
-def _register_analysis_tool(function, annotations):
-    """Register one pytemlib_mcp.analysis function as an MCP tool with its own name, signature and docstring.
+def _register_analysis_tool(function):
+    """Register one pytemlib_mcp.analysis function as a read-only MCP tool with its own name, signature and docstring.
 
     A result that carries an image (key ``_png``) becomes its dict plus a PNG image content block.
     """
-    from fastmcp.tools import ToolResult
-    from fastmcp.utilities.types import Image
 
     @functools.wraps(function)
     def run(*args, **kwargs):
@@ -281,17 +283,14 @@ def _register_analysis_tool(function, annotations):
             return ToolResult(content=[json.dumps(result), Image(data=png, format="png")], structured_content=result)
         return result
 
-    mcp.tool(annotations=annotations)(run)
+    mcp.tool(annotations=READ_ONLY_HINT)(run)
     ANALYSIS_TOOLS.append(f"{function.__name__} - {_first_line(function)}")
 
 
 if PYTEMLIB_AVAILABLE:
-    # Dataset reading, reference data, EDS, EELS, peak fitting, image and probe tools. Each takes a dataset
-    # reference ("path" or "path#key"), returns a dict, and refuses with {"error": {"code", "message"}}.
+    # Each takes a dataset reference ("path" or "path#key"), returns a dict, and refuses with {"error": {"code", "message"}}.
     for _function in mcp_analysis.READ_ONLY_TOOLS:
-        _register_analysis_tool(_function, READ_ONLY_HINT)
-    for _function in mcp_analysis.STORING_TOOLS:
-        _register_analysis_tool(_function, None)
+        _register_analysis_tool(_function)
 
 
 @mcp.tool()
@@ -301,19 +300,29 @@ def get_available_tools() -> str:
 
 
 def main(argv=None):
-    """Run the server. Without arguments: SSE on 127.0.0.1:8003 at /mcp, as it always has."""
-    import argparse
-    parser = argparse.ArgumentParser(description="pyTEMlib MCP server")
-    parser.add_argument("--transport", default="sse", choices=("sse", "streamable-http", "http", "stdio"))
-    parser.add_argument("--host", default="127.0.0.1", help='"127.0.0.1" for local-only, "0.0.0.0" to expose on your network')
-    parser.add_argument("--port", type=int, default=8003)
-    parser.add_argument("--path", default="/mcp")
-    args = parser.parse_args(argv)
+    """Run the server; options default to the PYTEMLIB_MCP_* environment variables, then SSE on 127.0.0.1:8003 at /mcp."""
+    args = parse_args(argv)
+    print(f"Starting pyTEMlib MCP Server ({args.transport})...", file=sys.stderr)
     if args.transport == "stdio":
         mcp.run(transport="stdio")
         return
-    print("Starting pyTEMlib MCP Server...")
     mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)
+
+
+def parse_args(argv=None):
+    """Server options from the command line, defaulting to environment variables."""
+    parser = argparse.ArgumentParser(description="pyTEMlib MCP server")
+    parser.add_argument("--transport", choices=["sse", "http", "streamable-http", "stdio"],
+                        default=os.environ.get("PYTEMLIB_MCP_TRANSPORT", "sse"),
+                        help="MCP transport (env PYTEMLIB_MCP_TRANSPORT, default sse)")
+    parser.add_argument("--host", default=os.environ.get("PYTEMLIB_MCP_HOST", "127.0.0.1"),
+                        help="Bind address; 0.0.0.0 exposes the server on your network "
+                             "(env PYTEMLIB_MCP_HOST, default 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PYTEMLIB_MCP_PORT", "8003")),
+                        help="Port (env PYTEMLIB_MCP_PORT, default 8003)")
+    parser.add_argument("--path", default=os.environ.get("PYTEMLIB_MCP_PATH", "/mcp"),
+                        help="URL path (env PYTEMLIB_MCP_PATH, default /mcp)")
+    return parser.parse_args(argv)
 
 
 # Run the server

@@ -180,6 +180,22 @@ class TestTargetAberrations(unittest.TestCase):
         ab = probe_tools.get_target_aberrations('NionUS200', 60000)
         self.assertEqual(ab['acceleration_voltage'], 60000)
 
+    def test_get_target_aberrations_nion_us200_unsupported_voltage_raises(self):
+        with self.assertRaisesRegex(ValueError, 'NionUS200 at 300 kV'):
+            probe_tools.get_target_aberrations('NionUS200', 300000)
+
+    def test_get_target_aberrations_nion_us100_unsupported_voltage_raises(self):
+        with self.assertRaisesRegex(ValueError, 'NionUS100 at 200 kV'):
+            probe_tools.get_target_aberrations('NionUS100', 200000)
+
+    def test_get_target_aberrations_spectra300_200kv(self):
+        ab = probe_tools.get_target_aberrations('Spectra300', 200000)
+        self.assertEqual(ab['acceleration_voltage'], 200000)
+
+    def test_get_target_aberrations_spectra300_unsupported_voltage_raises(self):
+        with self.assertRaisesRegex(ValueError, 'Spectra300 at 300 kV'):
+            probe_tools.get_target_aberrations('Spectra300', 300000)
+
     def test_get_target_aberrations_zeiss(self):
         """Test getting Zeiss MC200 target aberrations."""
         ab = probe_tools.get_target_aberrations('ZeissMC200', 200000)

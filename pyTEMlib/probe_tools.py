@@ -564,8 +564,18 @@ def get_source_energy_spread():
     return x, y
 
 
+def _raise_no_target_table(tem_name, acceleration_voltage, available_voltages):
+    available = ', '.join(f'{v / 1000:g} kV' for v in available_voltages)
+    raise ValueError(f'No target aberrations for {tem_name} at '
+                     f'{acceleration_voltage / 1000:g} kV; available: {available}')
+
+
 def get_target_aberrations(tem_name, acceleration_voltage):
-    """ Get target aberrations for specific TEMs"""
+    """ Get target aberrations for specific TEMs
+
+    Raises ValueError when tem_name has no table for acceleration_voltage
+    (in V). ZeissMC200 has one voltage-independent table.
+    """
     ab = {}
     if tem_name == 'NionUS200':
         if int(acceleration_voltage) == 200000:
@@ -618,6 +628,8 @@ def get_target_aberrations(tem_name, acceleration_voltage):
                   'convergence_angle': 30,
                   'Cc': 1.3e6}  # // Cc in  nm
 
+        if not ab:
+            _raise_no_target_table(tem_name, acceleration_voltage, (200000, 100000, 60000))
         ab['origin'] = 'target aberrations'
         ab['tem_name'] = tem_name
         ab['wavelength'] = pyTEMlib.image_tools.get_wavelength(ab['acceleration_voltage'])
@@ -658,6 +670,8 @@ def get_target_aberrations(tem_name, acceleration_voltage):
                   'convergence_angle': 30,
                   'Cc': 1.3e6}  # // Cc in  nm
 
+        if not ab:
+            _raise_no_target_table(tem_name, acceleration_voltage, (100000, 60000))
         ab['origin'] = 'target aberrations'
         ab['tem_name'] = tem_name
         ab['wavelength'] = pyTEMlib.image_tools.get_wavelength(ab['acceleration_voltage'])
@@ -678,6 +692,8 @@ def get_target_aberrations(tem_name, acceleration_voltage):
         ab['wavelength'] = pyTEMlib.image_tools.get_wavelength(ab['acceleration_voltage'])
 
     if tem_name == 'Spectra300':
+        if int(acceleration_voltage) != 200000:
+            _raise_no_target_table(tem_name, acceleration_voltage, (200000,))
         ab = {'C10': 0, 'C12a': 0, 'C12b': 0.38448128113770325,
               'C21a': -68.45251255685642, 'C21b': 64.85359774641199, 
               'C23a': 11.667578600494137, 'C23b': -29.775627778458194, 

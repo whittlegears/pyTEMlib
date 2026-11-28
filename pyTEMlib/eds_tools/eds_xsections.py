@@ -338,7 +338,7 @@ def write_k_factors(k_factors, metadata, file_name='k_factors.json'):
     file_name = os.path.join(config_path, file_name)
     save_dict = {"table" : k_factors, "metadata" : metadata}
     with open(file_name, "w", encoding='utf-8') as json_file:
-        json.dump(save_dict, json_file, indent=4, encoding='utf-8')
+        json.dump(save_dict, json_file, indent=4)
 
 
 def read_k_factors(file_name='k_factors.json'):
@@ -347,8 +347,10 @@ def read_k_factors(file_name='k_factors.json'):
         print('k-factor file not found', file_name)
         return None
     with open(os.path.join(config_path, file_name), 'r', encoding='utf-8') as json_file:
-        table, metadata = json.load(json_file)
-    return table, metadata
+        saved = json.load(json_file)
+    if set(saved) == {'table', 'metadata'}:
+        return saved['table'], saved['metadata']
+    return saved, {'name': os.path.basename(file_name)}
 
 
 def load_k_factors(reduced=True):

@@ -18,9 +18,9 @@ Every row cites the code that writes or reads the field.
 | `tiled.ts` | Angstrom `src/lib/tiled.ts` at `05b23ed` (`claude_dev`). |
 | `image_mosaic.py` | pyTEMlib `pyTEMlib/image_tools/image_mosaic.py` on `feature/mcp-analysis-tools`. |
 
-Commit `86b7eb7` ("Twins ask pyTEMlib for its 200 kV Spectra300 aberration table by name") deleted
-the whole `asyncroscopy/analysis_server/` directory, so the map store is not at the branch tip.
-The line numbers here are from its parent, `bdc9552`. Use `git show bdc9552:<path>` to read them.
+The map store now lives in this package as `pytemlib_mcp.analysis_server` (`src/pytemlib_mcp/analysis_server/`).
+The line numbers here are from asyncroscopy commit `bdc9552`, the last commit that held it there; the code was
+moved without changing those lines.
 
 ## 1. Runs
 
@@ -279,5 +279,3 @@ These are listed, not resolved.
    (`store.py:146-152`). This page does not show how a Mapper run file is served by Tiled. That was not verified.
 9. **Schema ownership and strictness.** The root schema refuses fields that the current writer does not write. Old maps
    with the inline `pois`/`poi_layer` fields fail it. Should the schema have a separate "accepted on read" form?
-10. **The map store is not at the asyncroscopy branch tip.** Commit `86b7eb7` deleted `analysis_server/`, but
-    `asyncroscopy/workflows/shipped_blocks.py:257` and `tests/analysis/` still call `collect_map_run`.

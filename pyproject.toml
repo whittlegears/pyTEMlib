@@ -70,7 +70,13 @@ pyTEMlib = "pyTEMlib:main"
 [project.optional-dependencies]
 test = [
     "pytest",
-    "pytest-runner"
+    "pytest-runner",
+]
+stitching = [
+    "opencv-python>=4.7.0",
+]
+atomai = [
+    "atomai",
 ]
 
 [tool.setuptools]

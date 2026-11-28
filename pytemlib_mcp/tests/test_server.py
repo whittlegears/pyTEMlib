@@ -35,7 +35,7 @@ def listed():
 
 def test_the_original_tools_are_still_there_and_every_analysis_function_is_a_tool():
     tools = listed()
-    analysis = {function.__name__ for function in mcp_analysis.READ_ONLY_TOOLS + mcp_analysis.STORING_TOOLS}
+    analysis = {function.__name__ for function in mcp_analysis.READ_ONLY_TOOLS}
     assert BASIC <= set(tools) and analysis <= set(tools)
     assert len(analysis) == 27 and set(tools) == BASIC | analysis
     assert not {'open_dataset', 'read_array', 'eels_elemental_ratio'} & set(tools)

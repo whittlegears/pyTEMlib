@@ -11,13 +11,17 @@ requires-python = ">=3.10"
 dependencies = [
     "pyTEMlib",
     "fastmcp>=3.2.4",
+    "h5py>=3.0",
+    "dask",
+    "tiled[client]>=0.2.9,<0.3",
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "jsonschema"]
+test = ["pytest", "jsonschema>=4.0", "tiled[server]>=0.2.9,<0.3"]
 
 [project.scripts]
 pytemlib-mcp = "pytemlib_mcp.server:main"
+pytemlib-analysis-server = "pytemlib_mcp.analysis_server.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
