@@ -47,9 +47,6 @@ def refused(result, code):
     return result
 
 
-# ------------------------------------------------------------------ dataset references and reading
-# Opening files is the host's job, so there is no tool for it; the analysis tools still read the dataset a reference names.
-
 def not_resolved(reference, code):
     with pytest.raises(analysis.AnalysisError) as raised:
         analysis.resolve(reference)
@@ -168,8 +165,6 @@ def test_analysis_never_changes_the_cached_dataset():
     assert json.dumps(dict(analysis.resolve(EDS_STO).metadata), sort_keys=True, default=str) == before
 
 
-# ------------------------------------------------------------------ reference data
-
 def test_emission_lines_of_iron_are_where_they_should_be():
     lines = {line['name']: line for line in ok(analysis.xray_emission_lines('Fe'))['lines']}
     assert lines['K-L3']['position_ev'] == pytest.approx(6404, abs=5) and lines['K-L3']['weight'] == 1.0
@@ -199,8 +194,6 @@ def test_element_lines_for_drawing_are_sorted_and_labelled():
     assert [line['position_ev'] for line in lines] == sorted(line['position_ev'] for line in lines)
     assert all(0 <= line['position_ev'] <= 6000 and line['weight'] >= 0.01 for line in lines)
 
-
-# ------------------------------------------------------------------ EDS: the SrTiO3 spectrum the app's fixture test used
 
 @pytest.mark.parametrize('label, expected_ev', [('Ti K-L3', 4511.0), ('Ti K-M3', 4931.0), ('Cu K-L3', 8048.0),
                                                 ('Sr K-L3', 14165.0), ('Sr L3-M5', 1806.0)])
@@ -258,8 +251,6 @@ def test_peak_search_ends_on_a_spectrum_with_fewer_peaks_than_asked_for(tmp_path
     peaks = ok(analysis.eds_find_peaks(path, number_of_peaks=30))['peaks']
     assert {round(peak['position_ev'], -1) for peak in peaks} >= {1740.0, 6400.0}
 
-
-# ------------------------------------------------------------------ EELS low loss
 
 def low_loss_spectrum(tmp_path, zero_at=0.4, plasmon=0.0):
     energy = np.arange(-10.0, 80.0, 0.05)
@@ -334,8 +325,6 @@ def test_multiple_scattering_gives_a_thickness_near_the_log_ratio_one():
     refused(analysis.eels_fit_multiple_scattering(LOW_LOSS, 12, 18, max_energy_ev=15), 'bad_window')
 
 
-# ------------------------------------------------------------------ EELS core loss
-
 def edge_spectrum(tmp_path, amplitude=5.0e9, exponent=3.0, edge_at=500.0, edge_height=40.0):
     energy = np.arange(300.0, 800.0, 0.5)
     background = amplitude * energy ** -exponent
@@ -379,8 +368,6 @@ def test_core_loss_quantification_of_srtio3_gives_one_titanium_to_three_oxygen()
     refused(analysis.eels_quantify(CORE_LOSS, ['Au']), 'no_edge_in_range')
     refused(analysis.eels_quantify(CORE_LOSS, []), 'bad_argument')
 
-
-# ------------------------------------------------------------------ generic peaks
 
 def three_peaks(tmp_path):
     x = np.arange(0.0, 200.0, 0.25)
@@ -436,8 +423,6 @@ def test_a_spectral_image_is_summed_over_its_pixels_and_says_so():
     found = ok(analysis.eds_find_peaks(f'{MAP}#SuperX', number_of_peaks=10))
     assert found['summed_spectra'] == 215 * 178 and found['peaks']
 
-
-# ------------------------------------------------------------------ images
 
 def lattice(size=128, period=8.0):
     rows, columns = np.mgrid[:size, :size]
@@ -516,8 +501,6 @@ def test_atoms_are_found_in_a_real_image():
     found = ok(analysis.find_atoms(IMAGE, atom_size=0.1))
     assert found['total'] > 50 and found['units'] == 'nm' and found['pixel_size'] == pytest.approx(0.0389, abs=0.001)
 
-
-# ------------------------------------------------------------------ probe
 
 def test_an_unaberrated_probe_is_close_to_the_diffraction_limit():
     probe = ok(analysis.simulate_probe(200, 30, include_image=True))

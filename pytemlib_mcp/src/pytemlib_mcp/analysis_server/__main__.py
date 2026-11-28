@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ..defaults import HOST, MCP_PATH, PORT
 from . import environment
 from .jobs import DEFAULT_MAX_WORKERS
 from .map_tools import DEFAULT_MAX_CANVAS_PIXELS
@@ -19,8 +20,8 @@ def parser(env: environment.Environment) -> argparse.ArgumentParser:
     out = argparse.ArgumentParser(prog="python -m pytemlib_mcp.analysis_server", description="pyTEMlib analysis MCP server: map, scoring, placement and note tools.")
     out.add_argument("--tiled", default="", help="Tiled server URI; without it, tools take local file paths.")
     out.add_argument("--api-key", default=None, help="Tiled API key (default: $ASYNCROSCOPY_TILED_API_KEY or $TILED_API_KEY).")
-    out.add_argument("--host", default="127.0.0.1", help="Bind address; 0.0.0.0 exposes the server on your network (default: %(default)s).")
-    out.add_argument("--port", type=int, default=8003, help="Port (default: %(default)s).")
+    out.add_argument("--host", default=HOST, help="Bind address; 0.0.0.0 exposes the server on your network (default: %(default)s).")
+    out.add_argument("--port", type=int, default=PORT, help="Port (default: %(default)s).")
     out.add_argument("--transport", default="streamable-http", choices=["streamable-http", "sse", "stdio"], help="MCP transport (default: %(default)s).")
     out.add_argument(
         "--local-root", action="append", default=None, metavar="DIR",
@@ -69,7 +70,7 @@ def serve(mcp, tools, args: argparse.Namespace, note: str = "") -> None:
         if args.transport == "stdio":
             mcp.run(transport="stdio")
         else:
-            print(f"pyTEMlib analysis server at http://{args.host}:{args.port}/mcp (Tiled: {args.tiled or 'none, local files'}; "
+            print(f"pyTEMlib analysis server at http://{args.host}:{args.port}{MCP_PATH} (Tiled: {args.tiled or 'none, local files'}; "
                   f"local roots: {', '.join(map(str, tools.store.local_roots))}"
                   + (f"; gathered runs and their maps are saved in {Path(args.local_runs).resolve()}" if args.local_runs else "") + ")", flush=True)
             if note:

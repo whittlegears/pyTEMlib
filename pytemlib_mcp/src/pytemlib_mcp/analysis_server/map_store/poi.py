@@ -384,7 +384,3 @@ class PoiStore:
             node.create_container(meta["poi_layer"], metadata={"kind": "poi_layer", "grid": grid})
         for name, points in groups.items():
             self._append(map_key, meta, name, points)
-
-    def set_pois(self, map_key: str, pois: list[dict]) -> None:
-        """Replace all points of interest."""
-        self.update_pois(map_key, lambda _current: list(pois))

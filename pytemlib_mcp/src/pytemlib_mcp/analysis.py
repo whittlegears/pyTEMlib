@@ -1073,7 +1073,6 @@ def simulate_probe(voltage_kv: float, aperture_mrad: float, defocus_nm: float = 
     return result
 
 
-# every tool here only computes; mcp_server.py marks them readOnlyHint
 READ_ONLY_TOOLS = (xray_emission_lines, xray_absorption_edges, element_reference_data,
                    eds_find_peaks, eds_identify_elements, eds_describe_elements, eds_element_lines, eds_net_intensity,
                    eds_quantify, eels_find_zero_loss_peak, eels_align_zero_loss, eels_resolution_function,

@@ -227,7 +227,7 @@ class MapStore(PoiStore):
         metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], "version": writer.name,
                     **self.sample_of(run), **metadata}
         try:
-            staged = writer.finish(metadata)
+            writer.finish(metadata)
         except Exception as exc:
             writer.abandon()
             if "401" in str(exc) or "permission" in str(exc).lower():

@@ -538,7 +538,6 @@ def test_a_drift_fit_is_reported_only_when_image_matches_measure_it():
     assert measured_drift_only({"matches_used": 0}) == {"matches_used": 0, "drift_unmeasured": unmeasured["drift_unmeasured"]}
 
 
-# collect_map_run gathers tiles taken one by one
 class _Node:
     structure_family = "array"
 

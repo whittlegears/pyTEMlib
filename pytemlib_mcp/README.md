@@ -24,6 +24,8 @@ python -m pytemlib_mcp --transport streamable-http
 python -m pytemlib_mcp.analysis_server --tiled http://localhost:9091 --api-key secret --port 8003
 ```
 
+Both servers default to the host, port and path in `src/pytemlib_mcp/defaults.py`.
+
 ## Tests
 
 ```bash

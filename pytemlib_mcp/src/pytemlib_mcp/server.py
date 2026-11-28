@@ -6,18 +6,19 @@ It exposes key functionalities for file I/O, data analysis, and visualization.
 """
 
 import argparse
+import functools
+import json
+import os
 import sys
+import traceback
+from typing import List
 
 from fastmcp import FastMCP
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
-import functools
-import os
-import json
-from typing import List
-import traceback
 
-# Import pyTEMlib modules
+from pytemlib_mcp.defaults import HOST, MCP_PATH, PORT
+
 try:
     import pyTEMlib as pytem
     from pyTEMlib import utilities
@@ -26,7 +27,6 @@ except ImportError as e:
     print(f"Warning: pyTEMlib not available: {e}", file=sys.stderr)
     PYTEMLIB_AVAILABLE = False
 
-# Create MCP server
 mcp = FastMCP("pyTEMlib-MCP")
 
 # Global state for loaded datasets: file name as given -> {key: sidpy.Dataset}.
@@ -168,7 +168,7 @@ def get_dataset_info(filename: str, dataset_key: str) -> str:
 
 @mcp.tool()
 def calculate_probe_size(voltage: float, convergence_angle_mrad: float) -> str:
-    """Calculate electron probe size using pyTEMlib probe_tools.
+    """Estimate the electron probe size as the Airy disk radius 0.61 λ / α (aberrations ignored).
 
     Parameters:
     - voltage: Acceleration voltage in volts
@@ -178,12 +178,9 @@ def calculate_probe_size(voltage: float, convergence_angle_mrad: float) -> str:
         return "pyTEMlib not available"
 
     try:
-        # Convert mrad to radians
         convergence_angle_rad = convergence_angle_mrad / 1000.0
-
-        # This is a simplified calculation - actual implementation would use probe_tools
         wavelength = utilities.get_wavelength(voltage)
-        probe_size = 0.61 * wavelength / convergence_angle_rad  # Airy disk approximation
+        probe_size = 0.61 * wavelength / convergence_angle_rad
 
         return f"Estimated probe size at {voltage/1000:.0f}kV with {convergence_angle_mrad}mrad convergence: {probe_size*1e9:.1f} nm"
 
@@ -192,7 +189,7 @@ def calculate_probe_size(voltage: float, convergence_angle_mrad: float) -> str:
 
 @mcp.tool()
 def analyze_diffraction_pattern(filename: str, dataset_key: str) -> str:
-    """Analyze a diffraction pattern dataset.
+    """Report the shape and intensity range of a loaded 2-D diffraction pattern.
 
     Parameters:
     - filename: File containing the diffraction data
@@ -211,15 +208,12 @@ def analyze_diffraction_pattern(filename: str, dataset_key: str) -> str:
     try:
         dataset = datasets[dataset_key]
 
-        # Basic analysis - check if it's a 2D image
         if len(dataset.shape) != 2:
             return f"Dataset {dataset_key} is not a 2D diffraction pattern (shape: {dataset.shape})"
 
         result = f"Diffraction pattern analysis for {dataset_key}:\n"
         result += f"Shape: {dataset.shape}\n"
         result += f"Data range: {dataset.min():.3f} to {dataset.max():.3f}\n"
-
-        # This would be extended with actual diffraction analysis functions
         result += "\nNote: Full diffraction analysis requires additional parameters (camera length, voltage, etc.)"
 
         return result
@@ -300,7 +294,7 @@ def get_available_tools() -> str:
 
 
 def main(argv=None):
-    """Run the server; options default to the PYTEMLIB_MCP_* environment variables, then SSE on 127.0.0.1:8003 at /mcp."""
+    """Run the server; options default to the PYTEMLIB_MCP_* environment variables, then SSE on HOST:PORT at MCP_PATH."""
     args = parse_args(argv)
     print(f"Starting pyTEMlib MCP Server ({args.transport})...", file=sys.stderr)
     if args.transport == "stdio":
@@ -315,16 +309,15 @@ def parse_args(argv=None):
     parser.add_argument("--transport", choices=["sse", "http", "streamable-http", "stdio"],
                         default=os.environ.get("PYTEMLIB_MCP_TRANSPORT", "sse"),
                         help="MCP transport (env PYTEMLIB_MCP_TRANSPORT, default sse)")
-    parser.add_argument("--host", default=os.environ.get("PYTEMLIB_MCP_HOST", "127.0.0.1"),
-                        help="Bind address; 0.0.0.0 exposes the server on your network "
-                             "(env PYTEMLIB_MCP_HOST, default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PYTEMLIB_MCP_PORT", "8003")),
-                        help="Port (env PYTEMLIB_MCP_PORT, default 8003)")
-    parser.add_argument("--path", default=os.environ.get("PYTEMLIB_MCP_PATH", "/mcp"),
-                        help="URL path (env PYTEMLIB_MCP_PATH, default /mcp)")
+    parser.add_argument("--host", default=os.environ.get("PYTEMLIB_MCP_HOST", HOST),
+                        help=f"Bind address; 0.0.0.0 exposes the server on your network "
+                             f"(env PYTEMLIB_MCP_HOST, default {HOST})")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PYTEMLIB_MCP_PORT", PORT)),
+                        help=f"Port (env PYTEMLIB_MCP_PORT, default {PORT})")
+    parser.add_argument("--path", default=os.environ.get("PYTEMLIB_MCP_PATH", MCP_PATH),
+                        help=f"URL path (env PYTEMLIB_MCP_PATH, default {MCP_PATH})")
     return parser.parse_args(argv)
 
 
-# Run the server
 if __name__ == "__main__":
     main()
