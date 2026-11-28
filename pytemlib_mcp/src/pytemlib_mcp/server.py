@@ -27,9 +27,9 @@ except ImportError as e:
 mcp = FastMCP("pyTEMlib-MCP")
 
 # Global state for loaded datasets: file name as given -> {key: sidpy.Dataset}.
-# It is the registry of pyTEMlib.mcp_analysis, so a file opened by either set of tools is known to both.
+# It is the registry of pytemlib_mcp.analysis, so a file opened by either set of tools is known to both.
 if PYTEMLIB_AVAILABLE:
-    from pyTEMlib import mcp_analysis
+    from pytemlib_mcp import analysis as mcp_analysis
     loaded_datasets = mcp_analysis.loaded_datasets
 else:
     mcp_analysis = None
@@ -343,7 +343,7 @@ def _first_line(function) -> str:
 
 
 def _register_analysis_tool(function, annotations):
-    """Register one pyTEMlib.mcp_analysis function as an MCP tool with its own name, signature and docstring.
+    """Register one pytemlib_mcp.analysis function as an MCP tool with its own name, signature and docstring.
 
     A result that carries an image (key ``_png``) becomes its dict plus a PNG image content block.
     """

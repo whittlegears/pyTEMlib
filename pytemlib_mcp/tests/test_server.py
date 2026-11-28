@@ -1,4 +1,4 @@
-"""The MCP server itself (pyTEMlib.mcp_server), called through a real MCP client over the in-memory transport."""
+"""The MCP server itself (pytemlib_mcp.server), called through a real MCP client over the in-memory transport."""
 
 import asyncio
 import json
@@ -8,9 +8,9 @@ import pytest
 
 fastmcp = pytest.importorskip('fastmcp')
 
-from pyTEMlib import mcp_analysis, mcp_server  # noqa: E402
+from pytemlib_mcp import analysis as mcp_analysis, server as mcp_server  # noqa: E402
 
-EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'example_data')
+EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'example_data')
 EDS_STO = os.path.join(EXAMPLES, 'EDS-STO.emd')
 IMAGE = os.path.join(EXAMPLES, 'p1-3-hr3.dm3')
 

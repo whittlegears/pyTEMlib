@@ -55,6 +55,11 @@ jobs:
         pip install pytest
         pip install pytest-cov
         pytest --cov=./ --cov-report=xml
+
+    - name: pytemlib-mcp tests
+      run: |
+        pip install ./pytemlib_mcp
+        pytest pytemlib_mcp/tests
         
     - name: Upload coverage to Codecov
       if: ${{ matrix.python-version == env.PYTHON_MAIN_VERSION }}

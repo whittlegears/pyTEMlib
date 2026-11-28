@@ -1,4 +1,4 @@
-"""The analysis functions behind the MCP server (pyTEMlib.mcp_analysis): dataset references, reference data,
+"""The analysis functions behind the MCP server (pytemlib_mcp.analysis): dataset references, reference data,
 EDS, EELS, peak fitting, images and the probe. Synthetic inputs have known answers; the example files are real data."""
 
 import base64
@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 from scipy import ndimage
 
-from pyTEMlib import mcp_analysis as analysis
+from pytemlib_mcp import analysis
 
-EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'example_data')
+EXAMPLES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'example_data')
 EDS_STO = os.path.join(EXAMPLES, 'EDS-STO.emd')  # the SrTiO3 Super-X spectrum (on a copper grid)
 LOW_LOSS = os.path.join(EXAMPLES, 'AL-DFoffset0.00.dm3')  # aluminium low-loss, plasmon at 15 eV
 CORE_LOSS = os.path.join(EXAMPLES, 'EELS_STO.dm3')  # SrTiO3 core-loss, Ti-L and O-K

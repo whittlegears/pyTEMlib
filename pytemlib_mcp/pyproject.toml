@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytemlib-mcp"
+version = "0.1.0"
+description = "pyTEMlib's analysis as MCP tools: EELS, EDS, peak fitting, images, probe and reference data"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "pyTEMlib",
+    "fastmcp>=3.2.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+pytemlib-mcp = "pytemlib_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

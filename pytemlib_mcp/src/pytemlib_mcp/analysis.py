@@ -1,5 +1,5 @@
 """
-Analysis functions behind the pyTEMlib MCP server (pyTEMlib/mcp_server.py registers each as a tool).
+Analysis functions behind the pyTEMlib MCP server (pytemlib_mcp/server.py registers each as a tool).
 
 Every function here is plain Python: it takes a dataset reference and numbers and returns a
 JSON-serialisable dict, so it can be tested and used without MCP.
@@ -40,14 +40,14 @@ import numpy as np
 import scipy
 import sidpy
 
-from . import file_tools, utilities, probe_tools
-from . import eels_tools, eds_tools, image_tools
-from .eels_tools import zero_loss_tools, low_loss_tools, core_loss_tools, peak_fit_tools
+from pyTEMlib import file_tools, utilities, probe_tools
+from pyTEMlib import eels_tools, eds_tools, image_tools
+from pyTEMlib.eels_tools import zero_loss_tools, low_loss_tools, core_loss_tools, peak_fit_tools
 
 __all__ = ['AnalysisError', 'add_resolver', 'set_allowed_roots', 'loaded_datasets', 'READ_ONLY_TOOLS',
            'STORING_TOOLS']
 
-# file name as given -> {key: sidpy.Dataset}; shared with the older tools of mcp_server.py
+# file name as given -> {key: sidpy.Dataset}; shared with the older tools of server.py
 loaded_datasets: dict[str, dict] = {}
 _file_stamp: dict[str, float] = {}
 _resolvers: list[Callable[[str], Any]] = []
@@ -196,7 +196,7 @@ def _read_text_spectrum(path: str) -> sidpy.Dataset:
 
 def _read_msa(path: str) -> sidpy.Dataset:
     """EMSA/MAS spectrum through pyTEMlib.eels_tools.eels_database.read_msa."""
-    from .eels_tools.eels_database import read_msa
+    from pyTEMlib.eels_tools.eels_database import read_msa
     with open(path, 'r', encoding='utf-8', errors='replace') as handle:
         parameters = read_msa(handle.read())
     counts = np.asarray(parameters.get('data', parameters.get('spectrum', [])), dtype=float)
