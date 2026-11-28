@@ -19,9 +19,9 @@ def parser(env: environment.Environment) -> argparse.ArgumentParser:
     out = argparse.ArgumentParser(prog="python -m pyTEMlib.analysis_server", description="pyTEMlib analysis MCP server: map, scoring, placement and note tools.")
     out.add_argument("--tiled", default="", help="Tiled server URI; without it, tools take local file paths.")
     out.add_argument("--api-key", default=None, help="Tiled API key (default: $ASYNCROSCOPY_TILED_API_KEY or $TILED_API_KEY).")
-    out.add_argument("--host", default="127.0.0.1")
-    out.add_argument("--port", type=int, default=8003)
-    out.add_argument("--transport", default="streamable-http", choices=["streamable-http", "sse", "stdio"])
+    out.add_argument("--host", default="127.0.0.1", help="Bind address; 0.0.0.0 exposes the server on your network (default: %(default)s).")
+    out.add_argument("--port", type=int, default=8003, help="Port (default: %(default)s).")
+    out.add_argument("--transport", default="streamable-http", choices=["streamable-http", "sse", "stdio"], help="MCP transport (default: %(default)s).")
     out.add_argument(
         "--local-root", action="append", default=None, metavar="DIR",
         help="Directory whose HDF5 files tools may read and write as local paths (repeatable; default: the working directory).",
