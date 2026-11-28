@@ -7,17 +7,15 @@ It exposes key functionalities for file I/O, data analysis, and visualization.
 
 from fastmcp import FastMCP
 import functools
-import numpy as np
 import os
 import json
-from typing import Dict, List, Any, Optional, Union
+from typing import List
 import traceback
 
 # Import pyTEMlib modules
 try:
     import pyTEMlib as pytem
-    from pyTEMlib import file_tools, utilities, image_tools, eels_tools, eds_tools
-    from pyTEMlib import crystal_tools, diffraction_tools, probe_tools, graph_tools
+    from pyTEMlib import utilities
     PYTEMLIB_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: pyTEMlib not available: {e}")
@@ -188,43 +186,6 @@ def calculate_probe_size(voltage: float, convergence_angle_mrad: float) -> str:
         return f"Error calculating probe size: {str(e)}"
 
 @mcp.tool()
-def get_element_info(element: Union[str, int]) -> str:
-    """Get information about a chemical element for EDS/EELS analysis.
-
-    Parameters:
-    - element: Element symbol (e.g., 'Fe') or atomic number (e.g., 26)
-    """
-    if not PYTEMLIB_AVAILABLE:
-        return "pyTEMlib not available"
-
-    try:
-        # Get atomic number
-        if isinstance(element, str):
-            z = utilities.get_z(element)
-            symbol = element
-        else:
-            z = element
-            symbol = utilities.elements[z] if 1 <= z < len(utilities.elements) else "Unknown"
-
-        result = f"Element: {symbol} (Z = {z})\n"
-
-        # Get ionization edges if available
-        try:
-            edges = utilities.get_ionization_energy(z)
-            if edges:
-                result += "Ionization edges:\n"
-                for edge, energy in edges.items():
-                    if energy > 0:
-                        result += f"  {edge}: {energy:.1f} eV\n"
-        except:
-            pass
-
-        return result
-
-    except Exception as e:
-        return f"Error getting element info: {str(e)}"
-
-@mcp.tool()
 def analyze_diffraction_pattern(filename: str, dataset_key: str) -> str:
     """Analyze a diffraction pattern dataset.
 
@@ -262,61 +223,24 @@ def analyze_diffraction_pattern(filename: str, dataset_key: str) -> str:
         return f"Error analyzing diffraction pattern: {str(e)}"
 
 @mcp.tool()
-def create_visualization_script(filename: str, dataset_key: str, plot_type: str = "image") -> str:
-    """Generate Python code to visualize a dataset.
+def create_visualization_script(filename: str, dataset_key: str) -> str:
+    """Generate Python code that reopens a loaded dataset and plots it with sidpy.
 
     Parameters:
     - filename: File containing the dataset
     - dataset_key: Key of the dataset to visualize
-    - plot_type: Type of plot ('image', 'spectrum', 'scatter')
     """
     if filename not in loaded_datasets:
         return f"File {filename} not loaded."
-
-    datasets = loaded_datasets[filename]
-    if dataset_key not in datasets:
+    if dataset_key not in loaded_datasets[filename]:
         return f"Dataset {dataset_key} not found."
-
-    dataset = datasets[dataset_key]
-
-    script = f"""# Visualization script for {dataset_key} from {filename}
-import matplotlib.pyplot as plt
-import numpy as np
-
-# Load the data (this would be done automatically in pyTEMlib)
-data = np.random.rand{dataset.shape}  # Placeholder - actual data would be loaded
-
-"""
-
-    if plot_type == "image" and len(dataset.shape) >= 2:
-        script += """
-# Display as image
-plt.figure(figsize=(10, 8))
-plt.imshow(data, cmap='viridis')
-plt.colorbar()
-plt.title(f'{dataset_key}')
-plt.show()
-"""
-    elif plot_type == "spectrum" and len(dataset.shape) == 1:
-        script += """
-# Display as spectrum
-plt.figure(figsize=(10, 6))
-plt.plot(data)
-plt.xlabel('Channel/Energy')
-plt.ylabel('Intensity')
-plt.title(f'{dataset_key}')
-plt.show()
-"""
-    else:
-        script += """
-# Generic plot
-plt.figure(figsize=(10, 6))
-plt.plot(data.flatten()[:1000])  # Show first 1000 points
-plt.title(f'{dataset_key} (sample)')
-plt.show()
-"""
-
-    return script
+    return (
+        "import matplotlib.pyplot as plt\n"
+        "from pytemlib_mcp import analysis\n\n"
+        f"dataset = analysis.resolve({f'{filename}#{dataset_key}'!r})\n"
+        "dataset.plot()\n"
+        "plt.show()\n"
+    )
 
 # The first tools of this server, in the order they have always been listed.
 BASIC_TOOLS = [
@@ -327,7 +251,6 @@ BASIC_TOOLS = [
     "list_loaded_datasets - List currently loaded datasets",
     "get_dataset_info - Get detailed dataset information",
     "calculate_probe_size - Calculate electron probe size",
-    "get_element_info - Get element information for spectroscopy",
     "analyze_diffraction_pattern - Analyze diffraction patterns",
     "create_visualization_script - Generate visualization code",
     "get_available_tools - List all available tools",

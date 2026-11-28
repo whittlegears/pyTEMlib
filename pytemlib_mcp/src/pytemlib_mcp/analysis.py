@@ -41,7 +41,7 @@ import scipy
 import sidpy
 
 from pyTEMlib import file_tools, utilities, probe_tools
-from pyTEMlib import eels_tools, eds_tools, image_tools
+from pyTEMlib import eds_tools, image_tools
 from pyTEMlib.eels_tools import zero_loss_tools, low_loss_tools, core_loss_tools, peak_fit_tools
 
 __all__ = ['AnalysisError', 'add_resolver', 'set_allowed_roots', 'loaded_datasets', 'READ_ONLY_TOOLS',

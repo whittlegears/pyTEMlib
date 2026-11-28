@@ -15,7 +15,7 @@ EDS_STO = os.path.join(EXAMPLES, 'EDS-STO.emd')
 IMAGE = os.path.join(EXAMPLES, 'p1-3-hr3.dm3')
 
 BASIC = {'get_pytemlib_status', 'calculate_electron_wavelength', 'list_supported_file_formats', 'open_tem_file',
-         'list_loaded_datasets', 'get_dataset_info', 'calculate_probe_size', 'get_element_info',
+         'list_loaded_datasets', 'get_dataset_info', 'calculate_probe_size',
          'analyze_diffraction_pattern', 'create_visualization_script', 'get_available_tools'}
 
 
