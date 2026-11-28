@@ -18,11 +18,14 @@ from .pyramid import _replace_metadata
 POI_CELLS = 64  # cells along each side of the POI layer's grid over the map
 CELL_KINDS = {"eds_point": "EDS point spectrum"}  # kinds kept in spatial cells, with their labels; every other kind is a highlight
 HIGHLIGHTS = "highlights"
+highlight_kind_labels = {"candidate": "Scored region", "note": "Note"}
 
 
-def poi_kind_labels() -> list[dict]:
-    """The kinds of point kept in spatial cells, each {"kind", "label"}: what a stitched map's metadata reports as poi_kinds."""
-    return [{"kind": kind, "label": label} for kind, label in sorted(CELL_KINDS.items())]
+def poi_kind_labels(kinds: list[str]) -> list[dict]:
+    """``kinds`` as {"kind", "label", "in_cells"}: the label of a kind this server writes (eds_pois, score_map, add_poi's
+    default), null for a kind a caller named itself; ``in_cells`` for the kinds kept in spatial cells."""
+    labels = {**highlight_kind_labels, **CELL_KINDS}
+    return [{"kind": kind, "label": labels.get(kind), "in_cells": kind in CELL_KINDS} for kind in kinds]
 
 
 class PoiStore:
@@ -140,6 +143,20 @@ class PoiStore:
         j = int(np.clip((x - grid["x0"]) // grid["cell_m"], 0, n - 1))
         return i, j
 
+    @classmethod
+    def cells_in(cls, grid: dict, box_m: list[float]) -> list[tuple[int, int]]:
+        """The cells (i, j) a stage box [x_min, x_max, y_min, y_max] touches, in order."""
+        x0, x1, y0, y1 = box_m
+        i0, j0 = cls._cell_of(grid, x0, y0)
+        i1, j1 = cls._cell_of(grid, x1, y1)
+        return [(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)]
+
+    @staticmethod
+    def cell_box(grid: dict, i: int, j: int) -> list[float]:
+        """The stage box [x_min, x_max, y_min, y_max] of cell (i, j)."""
+        cell = grid["cell_m"]
+        return [grid["x0"] + j * cell, grid["x0"] + (j + 1) * cell, grid["y0"] + i * cell, grid["y0"] + (i + 1) * cell]
+
     def _layer_name(self, meta: dict) -> str:
         return meta.get("poi_layer", "poi")
 
@@ -161,27 +178,24 @@ class PoiStore:
         run = meta.get("run")
         return self.points_key(str(run), self._local(map_key)) if run else map_key
 
-    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None) -> list[dict]:
+    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None,
+                  cells: bool = True) -> list[dict]:
         """Points of interest, optionally of one ``kind`` and inside a stage box [x_min, x_max, y_min, y_max].
 
-        With a box, only the spatial cells the box touches are read.
+        With a box, only the stored spatial cells the box touches are read; ``cells=False`` reads none of them (the highlights only).
         """
         key, meta = self._points_at(map_key)
-        return self._list_in(key, meta, kind, box_m, limit)
+        return self._list_in(key, meta, kind, box_m, limit, cells)
 
-    def _list_in(self, map_key: str, meta: dict, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None) -> list[dict]:
+    def _list_in(self, map_key: str, meta: dict, kind: str | None = None, box_m: list[float] | None = None, limit: int | None = None,
+                 cells: bool = True) -> list[dict]:
         out = list(_decode(meta.get("pois", [])) or [])  # older maps keep their points here
         grid = self._grid(map_key, meta)
-        cells = None
-        if box_m is not None:
-            x0, x1, y0, y1 = box_m
-            i0, j0 = self._cell_of(grid, x0, y0)
-            i1, j1 = self._cell_of(grid, x1, y1)
-            cells = {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+        touched = None if box_m is None else {f"c_{i}_{j}" for i, j in self.cells_in(grid, box_m)}
         if kind is None or kind not in CELL_KINDS:
             out += self._read_group(map_key, meta, self._highlights_name(meta))
-        if kind is None or kind in CELL_KINDS:
-            for name in self._cell_names(map_key, meta) if cells is None else [f"c_{i}_{j}" for i, j in sorted(cells)]:
+        if cells and (kind is None or kind in CELL_KINDS):
+            for name in [n for n in self._cell_names(map_key, meta) if touched is None or n in touched]:
                 out += self._read_group(map_key, meta, name)
                 if limit is not None and box_m is None and kind is None and len(out) >= limit:
                     break

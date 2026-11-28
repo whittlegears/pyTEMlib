@@ -89,7 +89,7 @@ READ_ONLY = frozenset({
     "list_loaded_datasets", "get_dataset_info", "calculate_probe_size",
     "analyze_diffraction_pattern", "create_visualization_script", "get_available_tools",
     "analysis_job_status", "analysis_job_results", "map_info", "list_maps", "get_region", "list_pois",
-    "list_scorers", "list_tiles", "to_stage", "find_features", "to_pixel", "list_placements",
+    "list_scorers", "list_tiles", "to_stage", "find_features", "to_pixel", "image_info", "list_placements",
     "list_annotations", "annotation_history", "match_tiles",
 })
 READ_ONLY = READ_ONLY | frozenset(tool.__name__ for tool in _ANALYSIS_TOOLS)  # pyTEMlib's analysis tools only compute

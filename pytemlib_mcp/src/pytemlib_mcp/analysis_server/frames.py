@@ -80,17 +80,59 @@ def unknown_key(store, key: str, what: str) -> dict[str, Any]:
     return {"error": {"code": "unknown_dataset", "message": message, **({"newest_keys": newest[::-1]} if newest else {})}}
 
 
+def image_array(store, key: str) -> tuple[Any, str]:
+    """The 2-D array of an acquisition and its key: the key itself, or the first array under its ``image`` group
+    (one that records ``pixel_size_m`` first)."""
+    node = store.client[key]
+    if getattr(node, "structure_family", None) != "container":
+        return node, key
+    prefix = f"{key}/image" if "image" in node else key
+    group = node["image"] if "image" in node else node
+    arrays = [(name, group[name]) for name in group if getattr(group[name], "structure_family", None) == "array"]
+    placed = [(name, a) for name, a in arrays if "pixel_size_m" in dict(a.metadata)]
+    if not (placed or arrays):
+        raise FrameError(f"{key} holds no image array")
+    name, found = (placed or arrays)[0]
+    return found, f"{prefix}/{name}"
+
+
 def image_node(store, key: str):
     """The 2-D array of an acquisition: the key itself, or the first array under its ``image`` group."""
-    node = store.client[key]
-    if getattr(node, "structure_family", None) == "container":
-        group = node["image"] if "image" in node else node
-        arrays = [group[name] for name in group if getattr(group[name], "structure_family", None) == "array"]
-        placed = [a for a in arrays if "pixel_size_m" in dict(a.metadata)]
-        if not (placed or arrays):
-            raise FrameError(f"{key} holds no image array")
-        node = (placed or arrays)[0]
-    return node
+    return image_array(store, key)[0]
+
+
+def image_descriptor(store, key: str) -> dict[str, Any]:
+    """Which array of ``key`` is its image and how it sits on the stage: {"kind", "image", "shape", "dtype", "chunks",
+    "frame"}. ``frame`` is {"pixel_size_m", "origin_xy_m", "centre_xy_m", "axes"}, where pixel (r, c) is centred at
+    stage (origin_xy_m[0] + c * pixel_size_m, origin_xy_m[1] + r * pixel_size_m); it is null, with ``frame_refused``
+    saying why, when the image cannot be placed. A stitched map's image is its level 0."""
+    try:
+        meta = store.map_metadata(key)
+    except (KeyError, ValueError, FileNotFoundError):
+        meta = None
+    if meta and meta.get("kind") == "stitched_map":
+        view = store.map_view(key, meta)
+        level = view["pyramid"][0]
+        rows, cols = level["shape"]
+        origin = level["origin_xy_m"]
+        pixel = level["pixel_size_m"]
+        centre = [origin[0] + (cols - 1) / 2.0 * pixel, origin[1] + (rows - 1) / 2.0 * pixel]
+        return {"kind": "map", "image": level["key"], "shape": level["shape"], "dtype": level["dtype"], "chunks": level["chunks"],
+                "frame": {"pixel_size_m": pixel, "origin_xy_m": origin, "centre_xy_m": centre, "axes": view["axes"]}, **store.sample_of(key)}
+    node, array_key = image_array(store, key)
+    structure = node.structure()
+    described = {"kind": "image", "image": array_key, "shape": [int(v) for v in structure.shape][-2:], "dtype": structure.data_type.to_numpy_dtype().str,
+                 "chunks": [[int(v) for v in axis] for axis in structure.chunks]}
+    try:
+        frame = frame_of(store, key)
+    except FrameError as exc:
+        return {**described, "frame": None, "frame_refused": str(exc), **store.sample_of(key)}
+    x0, y0 = pixel_to_stage(frame["dataset"], 0, 0)
+    reply = {**described, "frame": {"pixel_size_m": frame["pixel_size_m"], "origin_xy_m": [x0, y0], "centre_xy_m": frame["centre_xy_m"], "axes": AXES},
+             **frame["sample"]}
+    if not frame["shift_recorded"]:
+        reply["note"] = "this image does not record its image shift, so it is placed as if it had none"
+    return reply
 
 
 def frame_of(store, key: str) -> dict[str, Any]:
@@ -225,6 +267,19 @@ def register(mcp, store) -> None:
                             "and cannot be told apart: to find particles, take an image whose field of view is several times their "
                             "size (200 to 600 nm for nanoparticles). Bare support or noise also shows nothing.")
         return {"features": features, "pixel_size_m": frame["pixel_size_m"], "shape": frame["shape"], **frame["sample"], **note}
+
+    @mcp.tool()
+    def image_info(dataset: str) -> dict[str, Any]:
+        """Which array of a dataset (an acquisition's Tiled key, or a stitched map) is its image, and where it sits on
+        the stage. Returns {"kind": "image" or "map", "image": the array's key, "shape": [rows, cols], "dtype", "chunks",
+        "frame": {"pixel_size_m", "origin_xy_m": stage x, y of pixel (0, 0), "centre_xy_m", "axes"}}; frame is null,
+        with "frame_refused" saying why, for an image that does not record where it was taken."""
+        try:
+            return image_descriptor(store, dataset)
+        except KeyError:
+            return unknown_key(store, dataset, "map or image")
+        except (FrameError, FileNotFoundError) as exc:
+            return {"error": {"code": "no_image", "message": str(exc)}}
 
     @mcp.tool()
     def to_pixel(dataset: str, x_m: float, y_m: float) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 # Map data contract (as built today)
 
-This page records the map data that existing code writes and reads. It adds no new field. It is the
-starting point for moving the map server into `pytemlib_mcp` (mapping redesign, step S2).
+Sections 1 to 6 record the map data that existing code writes and reads (mapping redesign, step S2). Section 7
+records the view descriptors the analysis server's tools give clients (step S6).
 
 The machine-readable part is [`../schemas/stitched_map.schema.json`](../schemas/stitched_map.schema.json).
 It covers the stitched map record, the level nodes, the point of interest (POI) and the point store.
@@ -102,7 +102,8 @@ While tiles are being written, the file is named `.h5.partial`. `finish` renames
   metadata is the record with `kind` = `"stitching"`. The `swap` step then sets `kind` to `"stitched_map"` (`pyramid.py:86-93`).
   A failed write deletes the container (`pyramid.py:95-108`).
 - `list_maps` finds versions by `kind == "stitched_map"` and `run == <run>`. It sorts them by `stitched_at`, newest first
-  (`store.py:103-127`). Angstrom lists maps by `kind == "stitched_map"` alone (`tiled.ts:611-634`).
+  (`store.py:103-127`). Angstrom lists maps by `kind == "stitched_map"` alone (`tiled.ts:611-634`). The `list_maps` tool
+  now also lists every map when it is given no run (section 7.1), so a client need not search Tiled itself.
 
 ### 2.2 The record
 
@@ -271,7 +272,8 @@ These are listed, not resolved.
    written by the first rule is not known.
 5. **Highlights after a rescore.** After `update_highlights`, the store's current group is `highlights_<8 hex>`
    (`poi.py:336`, `poi.py:341`). Angstrom still reads the literal `highlights` group (`tiled.ts:664-666`), so it shows the
-   replaced points. This is not verified against a live Tiled.
+   replaced points. The `list_pois` tool reads the current group; `test_analysis_map_live_tiled.py` checks this against a
+   local Tiled server. A client that reads points through `list_pois` (section 7.3) does not have this problem.
 6. **Stored null stderr.** A map stored before the fix to `estimate_scan_linear` has `scan_linear.stderr` =
    `[[null, null], [null, null]]` (inf through `finite_or_none`). The schema refuses that. Should old maps be accepted?
 7. **The meaning of `stage_reported_m` columns 2 to 4** in layout 2 is not stated by `run_file.py`. The map store reads only x and y.
@@ -279,3 +281,91 @@ These are listed, not resolved.
    (`store.py:146-152`). This page does not show how a Mapper run file is served by Tiled. That was not verified.
 9. **Schema ownership and strictness.** The root schema refuses fields that the current writer does not write. Old maps
    with the inline `pois`/`poi_layer` fields fail it. Should the schema have a separate "accepted on read" form?
+
+## 7. View descriptors (analysis server tools)
+
+These are tool replies, not stored fields. They let a client draw a map, its points and an image without the
+conventions in sections 2 to 3: the level node names, the point store key, the grid formula and the highlights group.
+The JSON shapes are `$defs` in the schema; the tests validate the replies against them
+(`tests/analysis_server/test_analysis_map_views.py` on local HDF5 maps, `test_analysis_map_live_tiled.py` on a local
+Tiled server).
+
+A stitched map record no longer carries `poi_kinds` (commit `6c9d735` wrote it). A record is written once, so it
+cannot list kinds added later, and the schema refused the field. `map_info` gives the kinds instead (7.2).
+
+### 7.1 `list_maps(run=None, limit=20)`
+
+`run` is now optional. Without it, the tool lists every stitched map: those in Tiled, and the files named `*_map*.h5`
+under the server's local roots whose `metadata` has `kind == "stitched_map"`. Each entry of `maps` is
+`$defs/map_listing_entry`: the earlier `map`, `id`, `stitched_at`, `inputs_sha256` and `tiles`, plus `run` and the
+fields of `$defs/map_view`:
+
+| Field | Meaning |
+| :-- | :-- |
+| `title` | `<run stem>, stitched <YYYY-mm-dd HH:MM:SS> UTC`. Without a run, the map's own name. Without `stitched_at`, no time. |
+| `canvas_shape`, `pixel_size_m`, `origin_xy_m`, `axes` | From the record (2.2). This is the transform of decision D6, option A. |
+| `stage_box_m` | `[x_min, x_max, y_min, y_max]`, from pixel (-0.5, -0.5) to pixel (rows - 0.5, cols - 0.5) of level 0 (2.5). |
+| `local` | True for a map file, false for a Tiled key. |
+| `pyramid` | One `$defs/level_descriptor` per level, read from the stored array, not from the record. |
+
+A level descriptor:
+
+| Field | Meaning |
+| :-- | :-- |
+| `level` | k |
+| `key` | The Tiled key `<map>/level_<k>`, or `<file>#level_<k>` for a local map (the `path#dataset` form the dataset resolver reads). |
+| `shape` | `[rows, cols]` of the stored array. |
+| `dtype` | numpy's dtype string with byte order, for example `<f4`. |
+| `chunks` | Chunk sizes along each axis, as Tiled's array structure gives them. A local dataset's chunk shape is expanded to the same form. |
+| `downsample` | `2**k`, the factor `pixel_to_stage` uses. |
+| `pixel_size_m`, `origin_xy_m` | The level's own transform: pixel (r, c) of level k is centred at `(origin_xy_m[0] + c * pixel_size_m, origin_xy_m[1] + r * pixel_size_m)`. This is the formula of 2.5 worked out per level: `pixel_size_m = 2**k * p`, `origin_xy_m = origin + (2**k - 1) / 2 * p`. |
+
+### 7.2 `map_info(map)`
+
+The earlier fields stay (`levels` is still the number of levels). It adds the `$defs/map_view` fields of 7.1 and
+`poi_kinds`: the kinds of point on the map, sorted, each `$defs/poi_kind` `{kind, label, in_cells}`.
+
+- `label` is the server's label for a kind it writes itself: `eds_point` "EDS point spectrum" (`eds_pois`), `candidate`
+  "Scored region" (`score_map`), `note` "Note" (the default kind of `add_poi`). A kind that a caller named itself (for
+  example `revisit`) has the label null.
+- `in_cells` is true for the kinds kept in spatial cells (`CELL_KINDS`). Only those can come back as counts (7.3).
+
+### 7.3 `list_pois(map, kind=None, box_m=None, limit=200, counts_above=None)`
+
+Without `counts_above` the reply is as before. Points always come from the run's point store and its current
+highlights group (`highlights` or `highlights_<8 hex>`), so a client never walks the store.
+
+With `counts_above` = n, if more than n points kept in cells are in the cells the box touches (the whole map without a
+box), those points are not read. The reply then has:
+
+| Field | Meaning |
+| :-- | :-- |
+| `cells` | `[{cell: "<i>_<j>", count, box_m}]`, `$defs/poi_cell_count`, for each touched cell that holds points. `count` is the stored count of the whole cell, so a cell partly inside the box counts all its points. `box_m` is the cell's stage box. |
+| `cell_kinds` | The kinds the counts are of (`CELL_KINDS`). A count is of every one of these kinds. |
+| `pois` | The other points that match: the highlights, filtered by kind and box. |
+| `total` | `len(pois)` plus the sum of the counts. |
+
+A query for highlight kinds only (for example `kind="candidate"`) never gives counts. A query for cell kinds only gives
+counts and no points.
+
+With a box, only the stored cells that the box touches are read (one listing of the layer, then those cells). Before,
+every cell the box touched was asked for, stored or not, which against Tiled took minutes for half a map.
+
+### 7.4 `image_info(dataset)`
+
+New tool. It says which array of a dataset is its image, and where that image sits on the stage. Its reply is
+`$defs/image_info`:
+
+| Field | Meaning |
+| :-- | :-- |
+| `kind` | `"image"` or `"map"` |
+| `image` | The array's key. For an acquisition: the key itself when it is an array, else the first array of its `image` group (one that records `pixel_size_m` first), else the first array in it, the rule `frames.image_node` uses. For a map: its level 0 descriptor's key. No detector name is read. |
+| `shape`, `dtype`, `chunks` | `shape` is `[rows, cols]` (the last two axes); `dtype` and `chunks` are the array's. |
+| `frame` | `{pixel_size_m, origin_xy_m, centre_xy_m, axes}`. Pixel (r, c) is centred at `(origin_xy_m[0] + c * pixel_size_m, origin_xy_m[1] + r * pixel_size_m)`. For an image, `origin_xy_m` is pyTEMlib's `pixel_to_stage(dataset, 0, 0)` and `centre_xy_m` is `get_image_centre_m` (2.5 does not apply). |
+| `frame_refused` | With `frame` null: why the image cannot be placed (the refusals of `frame_of`: no position or pixel size, other axes, part of the scan field, tilt). |
+| `note` | When the image records no image shift and is placed as if it had none. |
+| `sample_id`, `sample_load_id` | When the dataset records them. |
+
+An unknown key gives the `unknown_dataset` error with the newest keys. A container with no array gives the error code
+`no_image`.
+

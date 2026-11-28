@@ -194,6 +194,109 @@
       "required": ["pois"],
       "additionalProperties": false,
       "properties": { "pois": { "type": "array", "items": { "$ref": "#/$defs/poi" } } }
+    },
+    "chunks": {
+      "description": "Chunk sizes along each axis, as Tiled's array structure gives them; each axis sums to the shape.",
+      "type": "array",
+      "items": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1 },
+      "minItems": 2
+    },
+    "level_descriptor": {
+      "description": "One pyramid level in a map_view, read from the stored array. Pixel (r, c) of the level is centred at stage (origin_xy_m[0] + c * pixel_size_m, origin_xy_m[1] + r * pixel_size_m).",
+      "type": "object",
+      "required": ["level", "key", "shape", "dtype", "chunks", "downsample", "pixel_size_m", "origin_xy_m"],
+      "additionalProperties": false,
+      "properties": {
+        "level": { "type": "integer", "minimum": 0 },
+        "key": { "description": "A Tiled key <map>/level_<k>, or <file>#level_<k> for a local map.", "type": "string" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "dtype": { "description": "numpy's dtype string, with byte order (for example <f4).", "type": "string" },
+        "chunks": { "$ref": "#/$defs/chunks" },
+        "downsample": { "type": "integer", "minimum": 1 },
+        "pixel_size_m": { "type": "number", "exclusiveMinimum": 0 },
+        "origin_xy_m": { "$ref": "#/$defs/pair" }
+      }
+    },
+    "map_view": {
+      "description": "What the analysis server gives a client to draw a map: in every list_maps entry and in map_info.",
+      "type": "object",
+      "required": ["title", "canvas_shape", "pixel_size_m", "origin_xy_m", "axes", "stage_box_m", "local", "pyramid"],
+      "properties": {
+        "title": { "type": "string" },
+        "canvas_shape": { "$ref": "#/$defs/shape" },
+        "pixel_size_m": { "type": "number", "exclusiveMinimum": 0 },
+        "origin_xy_m": { "$ref": "#/$defs/pair" },
+        "axes": { "type": ["string", "null"] },
+        "stage_box_m": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+        "local": { "type": "boolean" },
+        "pyramid": { "type": "array", "items": { "$ref": "#/$defs/level_descriptor" }, "minItems": 1 }
+      }
+    },
+    "map_listing_entry": {
+      "description": "One entry of list_maps' maps.",
+      "allOf": [{ "$ref": "#/$defs/map_view" }],
+      "type": "object",
+      "required": ["map", "id", "stitched_at", "inputs_sha256", "tiles", "run"],
+      "properties": {
+        "map": { "type": "string" },
+        "id": { "type": ["string", "null"] },
+        "stitched_at": { "type": ["number", "null"] },
+        "inputs_sha256": { "type": ["string", "null"] },
+        "tiles": { "type": ["integer", "null"] },
+        "run": { "type": ["string", "null"] }
+      },
+      "unevaluatedProperties": false
+    },
+    "poi_kind": {
+      "description": "One entry of map_info's poi_kinds. label is null for a kind a caller named itself.",
+      "type": "object",
+      "required": ["kind", "label", "in_cells"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "in_cells": { "type": "boolean" }
+      }
+    },
+    "poi_cell_count": {
+      "description": "One entry of list_pois' cells (given with counts_above): the points kept in one spatial cell, counted from its stored count.",
+      "type": "object",
+      "required": ["cell", "count", "box_m"],
+      "additionalProperties": false,
+      "properties": {
+        "cell": { "type": "string", "pattern": "^[0-9]+_[0-9]+$" },
+        "count": { "type": "integer", "minimum": 1 },
+        "box_m": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+      }
+    },
+    "image_frame": {
+      "type": "object",
+      "required": ["pixel_size_m", "origin_xy_m", "centre_xy_m", "axes"],
+      "additionalProperties": false,
+      "properties": {
+        "pixel_size_m": { "type": "number", "exclusiveMinimum": 0 },
+        "origin_xy_m": { "$ref": "#/$defs/pair" },
+        "centre_xy_m": { "$ref": "#/$defs/pair" },
+        "axes": { "type": ["string", "null"] }
+      }
+    },
+    "image_info": {
+      "description": "image_info's reply: which array of a dataset is its image, and its frame (null with frame_refused when it cannot be placed).",
+      "type": "object",
+      "required": ["kind", "image", "shape", "dtype", "chunks", "frame"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["image", "map"] },
+        "image": { "type": "string" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "dtype": { "type": "string" },
+        "chunks": { "$ref": "#/$defs/chunks" },
+        "frame": { "oneOf": [{ "$ref": "#/$defs/image_frame" }, { "type": "null" }] },
+        "frame_refused": { "type": "string" },
+        "note": { "type": "string" },
+        "sample_id": { "type": "string", "minLength": 1 },
+        "sample_load_id": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }

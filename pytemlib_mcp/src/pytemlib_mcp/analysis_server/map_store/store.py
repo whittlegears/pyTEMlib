@@ -13,7 +13,7 @@ import h5py
 import numpy as np
 
 from .runs import LazyTiles, LocalPathRefused, RunData, RunInfo, TileSource, _Locks, _decode, _file_lock, _layout1_info, _layout2_info
-from .poi import PoiStore, poi_kind_labels
+from .poi import PoiStore
 from .pyramid import _LocalMapWriter, _TiledMapWriter
 
 AXES = "rows=+y, columns=+x; stage coordinates in metres"
@@ -100,31 +100,48 @@ class MapStore(PoiStore):
         now = time.time()
         return f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime(now))}{int(now % 1 * 1000):03d}Z_{uuid.uuid4().hex[:4]}"
 
-    def list_maps(self, run: str) -> list[dict]:
-        """Every stitched version of ``run``'s map, newest first: {"map", "id", "stitched_at", "inputs_sha256", "tiles"}."""
-        found: list[tuple[str, dict]] = []
-        if self.is_local(run):
-            name = self.map_name(run)
-            for path in Path(run).parent.glob(f"{name}*.h5"):
-                if path.name != f"{name}.h5" and not path.name.startswith(f"{name}_"):
-                    continue
-                try:
-                    with _file_lock(path), h5py.File(path, "r") as h5:
-                        meta = json.loads(h5.attrs["metadata"])
-                except (OSError, KeyError, ValueError):
-                    continue
-                if meta.get("kind") == "stitched_map" and Path(str(meta.get("run", ""))).resolve() == Path(run).resolve():
-                    found.append((str(path), meta))
-        else:
-            from tiled.queries import Key
+    def list_maps(self, run: str | None = None) -> list[dict]:
+        """Every stitched version of ``run``'s map, newest first: {"map", "id", "stitched_at", "inputs_sha256", "tiles", "run"}.
 
-            for key, node in self.client.search(Key("kind") == "stitched_map").search(Key("run") == run).items():
-                found.append((key, dict(node.metadata)))
+        Without ``run``, every stitched map the store has: in Tiled, and in the HDF5 files named ``*_map*.h5`` under
+        ``local_roots``."""
+        found = self._stitched(run)
         found.sort(key=lambda item: (float(_decode(item[1].get("stitched_at")) or 0.0), item[0]), reverse=True)
         return [
-            {"map": key, "id": meta.get("id"), "stitched_at": _decode(meta.get("stitched_at")), "inputs_sha256": meta.get("inputs_sha256"), "tiles": _decode(meta.get("tiles"))}
+            {"map": key, "id": meta.get("id"), "stitched_at": _decode(meta.get("stitched_at")), "inputs_sha256": meta.get("inputs_sha256"),
+             "tiles": _decode(meta.get("tiles")), "run": meta.get("run")}
             for key, meta in found
         ]
+
+    def _stitched(self, run: str | None) -> list[tuple[str, dict]]:
+        if run is None:
+            found = self._local_maps([path for root in self.local_roots for path in root.rglob("*_map*.h5")], None)
+            return found + (self._tiled_maps(None) if self.tiled_uri else [])
+        if self.is_local(run):
+            name = self.map_name(run)
+            return self._local_maps([p for p in Path(run).parent.glob(f"{name}*.h5") if p.name == f"{name}.h5" or p.name.startswith(f"{name}_")], run)
+        return self._tiled_maps(run)
+
+    @staticmethod
+    def _local_maps(paths: list[Path], run: str | None) -> list[tuple[str, dict]]:
+        found = []
+        for path in paths:
+            try:
+                with _file_lock(path), h5py.File(path, "r") as h5:
+                    meta = json.loads(h5.attrs["metadata"])
+            except (OSError, KeyError, ValueError):
+                continue
+            if meta.get("kind") == "stitched_map" and (run is None or Path(str(meta.get("run", ""))).resolve() == Path(run).resolve()):
+                found.append((str(path), meta))
+        return found
+
+    def _tiled_maps(self, run: str | None) -> list[tuple[str, dict]]:
+        from tiled.queries import Key
+
+        search = self.client.search(Key("kind") == "stitched_map")
+        if run is not None:
+            search = search.search(Key("run") == run)
+        return [(key, dict(node.metadata)) for key, node in search.items()]
 
     def current_map(self, run: str) -> str | None:
         """Key or path of the newest map stitched from ``run``, or None."""
@@ -208,7 +225,7 @@ class MapStore(PoiStore):
         done, so a failure here removes a version nothing can have named.
         """
         metadata = {"kind": "stitched_map", "run": run, "axes": AXES, "id": uuid.uuid4().hex, "parents": [run], "version": writer.name,
-                    "poi_kinds": poi_kind_labels(), **self.sample_of(run), **metadata}
+                    **self.sample_of(run), **metadata}
         try:
             staged = writer.finish(metadata)
         except Exception as exc:
@@ -290,3 +307,49 @@ class MapStore(PoiStore):
             with self._lock(map_key), h5py.File(map_key, "r") as h5:
                 return tuple(h5[f"level_{level}"].shape)
         return tuple(self.client[map_key][f"level_{level}"].shape)
+
+    def map_view(self, map_key: str, meta: dict | None = None) -> dict:
+        """What a client needs to draw a stitched map: {"title", "canvas_shape", "pixel_size_m", "origin_xy_m", "axes",
+        "stage_box_m", "local", "pyramid"}. ``pyramid`` has one descriptor per level, read from the stored arrays:
+        {"level", "key", "shape", "dtype", "chunks", "downsample", "pixel_size_m", "origin_xy_m"}. Level k's pixel (r, c)
+        is centred at stage (origin_xy_m[0] + c * pixel_size_m, origin_xy_m[1] + r * pixel_size_m) of that level."""
+        meta = meta or self.map_metadata(map_key)
+        pixel = float(meta["pixel_size_m"])
+        ox, oy = (float(v) for v in meta["origin_xy_m"])
+        rows, cols = (int(v) for v in meta["canvas_shape"])
+        local = self._local(map_key)
+        arrays = self._level_arrays(map_key, int(meta["levels"]), local)
+        pyramid = []
+        for level, (key, shape, dtype, chunks) in enumerate(arrays):
+            factor = 2**level
+            pyramid.append({"level": level, "key": key, "shape": shape, "dtype": dtype, "chunks": chunks, "downsample": factor,
+                            "pixel_size_m": pixel * factor, "origin_xy_m": [ox + (factor - 1) / 2.0 * pixel, oy + (factor - 1) / 2.0 * pixel]})
+        return {"title": self.map_title(map_key, meta), "canvas_shape": [rows, cols], "pixel_size_m": pixel, "origin_xy_m": [ox, oy],
+                "axes": meta.get("axes"), "stage_box_m": [ox - pixel / 2, ox + (cols - 0.5) * pixel, oy - pixel / 2, oy + (rows - 0.5) * pixel],
+                "local": local, "pyramid": pyramid}
+
+    def map_title(self, map_key: str, meta: dict) -> str:
+        """The run's name and the UTC time the map was stitched, or the map's own name when it records neither."""
+        name = self._stem(str(meta["run"])) if meta.get("run") else self._stem(map_key)
+        stitched = _decode(meta.get("stitched_at"))
+        if not isinstance(stitched, (int, float)):
+            return name
+        return f"{name}, stitched {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(float(stitched)))} UTC"
+
+    def _level_arrays(self, map_key: str, levels: int, local: bool) -> list[tuple[str, list[int], str, list[list[int]]]]:
+        """(key, shape, dtype, chunks per axis) of each level array: a Tiled key ``<map>/level_<k>``, or ``<file>#level_<k>``."""
+        out = []
+        if local:
+            with self._lock(map_key), h5py.File(map_key, "r") as h5:
+                for level in range(levels):
+                    data = h5[f"level_{level}"]
+                    sides = data.chunks or data.shape
+                    chunks = [[min(side, n - start) for start in range(0, n, side)] for n, side in zip(data.shape, sides)]
+                    out.append((f"{map_key}#level_{level}", [int(v) for v in data.shape], data.dtype.str, chunks))
+            return out
+        node = self.client[map_key]
+        for level in range(levels):
+            structure = node[f"level_{level}"].structure()
+            out.append((f"{map_key}/level_{level}", [int(v) for v in structure.shape], structure.data_type.to_numpy_dtype().str,
+                        [[int(v) for v in axis] for axis in structure.chunks]))
+        return out

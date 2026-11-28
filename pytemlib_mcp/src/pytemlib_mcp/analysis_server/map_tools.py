@@ -58,7 +58,8 @@ from pyTEMlib.image_tools.image_mosaic import pair_shift
 
 from .frames import FrameError, frame_of, image_dataset, image_node
 from .jobs import DEFAULT_MAX_WORKERS, JobRunner
-from .map_store import MapStore, level_shape_of, pixel_to_stage, stage_box_to_pixels
+from .map_store import CELL_KINDS, MapStore, level_shape_of, pixel_to_stage, stage_box_to_pixels
+from .map_store.poi import poi_kind_labels
 from .registry import Registry
 
 PREVIEW_MAX_SIDE = 512
@@ -469,13 +470,10 @@ class MapTools:
 
     def map_info(self, map_key: str) -> dict[str, Any]:
         meta = self.store.map_metadata(map_key)
-        h, w = meta["canvas_shape"]
-        x_min, y_min = pixel_to_stage(meta, -0.5, -0.5)
-        x_max, y_max = pixel_to_stage(meta, h - 0.5, w - 0.5)
+        view = self.store.map_view(map_key, meta)
         info = {
-            "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], "canvas_shape": meta["canvas_shape"],
-            "pixel_size_m": meta["pixel_size_m"], "stage_box_m": [x_min, x_max, y_min, y_max],
-            "points_of_interest": self.store.poi_count(map_key),
+            "map": map_key, "run": meta.get("run"), "tiles": meta.get("tiles"), "levels": meta["levels"], **view,
+            "points_of_interest": self.store.poi_count(map_key), "poi_kinds": poi_kind_labels(self.store.poi_kinds(map_key)),
             "stitching": {k: meta[k] for k in ("matches_used", "median_residual_px", "p95_residual_px", "fallback_tiles", "unplaced_tiles", "scan_linear", "tile_gain", "drift", "drift_unmeasured") if k in meta},
             "id": meta.get("id"), "stitched_at": meta.get("stitched_at"), "inputs_sha256": meta.get("inputs_sha256"),
         }
@@ -488,12 +486,13 @@ class MapTools:
                 info["versions"] = {"count": len(versions), "newest": versions[0]["map"], "this_is_newest": versions[0]["map"] == map_key}
         return info
 
-    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
+    def list_pois(self, map_key: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200,
+                  counts_above: int | None = None) -> dict[str, Any]:
         """{"total": how many match, "pois": at most ``limit`` of them}; the shape is the same for every filter,
         except that a filter matching nothing also gives how many points the map has (``total_on_map``) and, for a
         kind, the kinds it has (``kinds_on_map``). A box with no area ([0, 0, 0, 0]) is no box; one shrunk to a point
         ([x, x, y, y]) lists the points nearest it, closest first, each with ``distance_m`` (of any kind when none of
-        the asked kinds is on the map)."""
+        the asked kinds is on the map). ``counts_above``: see ``_crowded``."""
         limit = max(0, int(limit))
         # Models ask for kind="all" or list several kinds in one string. A filter that matches nothing would read as no points.
         kinds = {k for k in re.split(r"[\s,;|]+", kind or "") if k} - {"all", "any", "*"}
@@ -506,6 +505,10 @@ class MapTools:
             box_m = None
         if point is not None:
             return self._nearest(map_key, point, kinds, limit)
+        if counts_above is not None and (not kinds or kinds & set(CELL_KINDS)):
+            crowded = self._crowded(map_key, kinds, box_m, limit, max(0, int(counts_above)))
+            if crowded is not None:
+                return crowded
         if box_m is None and not kinds:
             return {"total": self.store.poi_count(map_key), "pois": self.store.list_pois(map_key, limit=limit)}
         if not kinds:
@@ -518,6 +521,27 @@ class MapTools:
             if kinds and box_m is None:
                 out["kinds_on_map"] = self.store.poi_kinds(map_key)
         return out
+
+    def _crowded(self, map_key: str, kinds: set[str], box_m: list[float] | None, limit: int, counts_above: int) -> dict[str, Any] | None:
+        """Per-cell counts in place of the points kept in cells, when more than ``counts_above`` of them are in the cells
+        the box (or the whole map) touches; None when there are not that many. Counts come from the stored cell counts,
+        so no cell is read: each is of the whole cell, every kind kept in cells. The highlights that match are still
+        listed as points."""
+        counts = self.store.poi_counts(map_key)
+        grid = counts["grid"]
+        touched = counts["cells"] if box_m is None else {f"{i}_{j}": counts["cells"].get(f"{i}_{j}", 0) for i, j in self.store.cells_in(grid, box_m)}
+        cells = [{"cell": name, "count": n, "box_m": self.store.cell_box(grid, *(int(v) for v in name.split("_")))} for name, n in sorted(touched.items()) if n > 0]
+        counted = sum(c["count"] for c in cells)
+        if counted <= counts_above:
+            return None
+        highlight_kinds = sorted(kinds - set(CELL_KINDS))
+        if kinds and not highlight_kinds:
+            pois = []
+        elif highlight_kinds:
+            pois = [p for k in highlight_kinds for p in self.store.list_pois(map_key, kind=k, box_m=box_m)]
+        else:
+            pois = self.store.list_pois(map_key, box_m=box_m, cells=False)
+        return {"total": len(pois) + counted, "pois": pois[:limit], "cells": cells, "cell_kinds": sorted(CELL_KINDS)}
 
     def _nearest(self, map_key: str, point: tuple[float, float], kinds: set[str], limit: int) -> dict[str, Any]:
         """The points nearest ``point``, closest first, of the asked kinds (of any kind when the map has none of them)."""
@@ -680,18 +704,23 @@ class MapTools:
 
         @mcp.tool()
         def map_info(map: str) -> dict[str, Any]:
-            """Tiles, size, levels, stage extent and number of points of interest of a stitched map.
+            """Tiles, size, levels, stage extent and number of points of interest of a stitched map, the kinds of point on it
+            with their labels (poi_kinds), and how to draw it: title, origin_xy_m, pixel_size_m, axes and pyramid (one entry
+            per level: level, key, shape, dtype, chunks, downsample, pixel_size_m, origin_xy_m).
 
             Given a Mapper run instead, the refusal names the run's stitched map."""
             return tools.map_info(map)
 
         @mcp.tool()
-        def list_maps(run: str, limit: int = 20) -> dict[str, Any]:
+        def list_maps(run: str | None = None, limit: int = 20) -> dict[str, Any]:
             """Every stitched version of a run's map, newest first (each assemble_map makes a new one; none is deleted).
+            Leave run out to list every stitched map.
 
-            Returns {"total", "maps": [{"map", "id", "stitched_at", "inputs_sha256", "tiles"}, at most ``limit``]}."""
+            Returns {"total", "maps": [at most ``limit``]}; each map has map, id, stitched_at, inputs_sha256, tiles, run,
+            title, canvas_shape, pixel_size_m, origin_xy_m, axes, stage_box_m, local and pyramid (one entry per level:
+            level, key, shape, dtype, chunks, downsample, pixel_size_m, origin_xy_m)."""
             maps = tools.store.list_maps(run)
-            return {"total": len(maps), "maps": maps[: max(0, int(limit))]}
+            return {"total": len(maps), "maps": [{**entry, **tools.store.map_view(entry["map"])} for entry in maps[: max(0, int(limit))]]}
 
         @mcp.tool()
         def get_region(map: str, box_m: list[float], level: int | None = None) -> ToolResult:
@@ -719,7 +748,8 @@ class MapTools:
         tools = self
 
         @mcp.tool()
-        def list_pois(map: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200) -> dict[str, Any]:
+        def list_pois(map: str, kind: str | None = None, box_m: list[float] | None = None, limit: int = 200,
+                      counts_above: int | None = None) -> dict[str, Any]:
             """Points of interest on a map (stage x_m, y_m in metres, kind, source, score, reason, links).
 
             kind: leave it out to list every point (the usual call). Give it only when the user asks for one kind:
@@ -727,8 +757,11 @@ class MapTools:
             box_m: only those inside [x_min, x_max, y_min, y_max] (only that part of the map is read); leave it out for all.
             Returns {"total": how many match, "pois": [at most ``limit`` of them]}, always this shape; when a filter
             matches nothing, "total_on_map" says how many points the map has.
+            counts_above: for drawing a crowded map. When more than this many points kept in cells (poi_kinds with
+            in_cells) are in the box, they are not listed: "cells" gives [{"cell", "count", "box_m"}] for each cell the
+            box touches (a count is of the whole cell), and "pois" lists only the other points.
             """
-            listed = tools.list_pois(map, kind=kind, box_m=box_m, limit=limit)
+            listed = tools.list_pois(map, kind=kind, box_m=box_m, limit=limit, counts_above=counts_above)
             # A small model has little context, so empty fields are dropped and numbers are rounded.
             # Positions are given to 0.01 nm and scores to 0.01. The store keeps them exact.
             # A scored point keeps its scorer version, so a reader can tell which scorer found it.
